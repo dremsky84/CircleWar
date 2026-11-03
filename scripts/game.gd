@@ -13,10 +13,14 @@ const START_VALUE := 15.0      # Startarmee beider Spieler
 const ARMY_SPEED := 160.0      # Pixel pro Sekunde für entsendete Armeen
 const BASE_GROWTH := 1.0       # Armee pro Sekunde auf einem besetzten Kreis
 const FRACTIONS := [0.25, 0.5, 0.75, 1.0]
-const TAP_TOLERANCE := 12.0    # Zusätzlicher Trefferbereich um Kreise (Finger)
+const TAP_TOLERANCE := 16.0    # Trefferfläche = sichtbarer Kreis + dieser Rand
+const MIN_HIT_RADIUS := 56.0   # auch kleine Kreise sind mindestens so gut treffbar
+const RELEASE_SNAP := 30.0     # beim Loslassen zählt ein Kreis auch knapp daneben
 const MIN_CIRCLES := 4
 const MAX_CIRCLES := 30
 const SETTINGS_PATH := "user://settings.cfg"
+const SPEEDS := [0.5, 1.0, 2.0, 4.0]
+const SPEED_LABELS := ["0.5", "1", "2", "4"]
 
 const BG_COLOR := Color("#14181f")
 const COLORS := {
@@ -51,6 +55,7 @@ const LEVELS := [
 # Einstellungen (im Menü wählbar, werden gespeichert)
 var difficulty := 2
 var circle_count := 12
+var dev_mode := false
 
 var state := State.MENU
 var map_size := DESIGN_SIZE
@@ -67,6 +72,14 @@ var level: Dictionary = LEVELS[2]
 var game_over := false
 var winner := 0
 var rng := RandomNumberGenerator.new()
+
+# Developer Mode (nur aktiv, wenn im Menü eingeschaltet)
+var dev_open := false          # Panel sichtbar
+var dev_paused := false
+var dev_speed_index := 1
+var dev_ai_frozen := false
+var dev_info := false
+var dev_tool := ""             # "", "owner", "plus", "minus"
 
 
 func _ready() -> void:
@@ -87,12 +100,14 @@ func _load_settings() -> void:
 	if cfg.load(SETTINGS_PATH) == OK:
 		difficulty = clampi(int(cfg.get_value("game", "difficulty", difficulty)), 0, LEVELS.size() - 1)
 		circle_count = clampi(int(cfg.get_value("game", "circles", circle_count)), MIN_CIRCLES, MAX_CIRCLES)
+		dev_mode = bool(cfg.get_value("game", "dev", false))
 
 
 func _save_settings() -> void:
 	var cfg := ConfigFile.new()
 	cfg.set_value("game", "difficulty", difficulty)
 	cfg.set_value("game", "circles", circle_count)
+	cfg.set_value("game", "dev", dev_mode)
 	cfg.save(SETTINGS_PATH)
 
 
@@ -107,6 +122,7 @@ func start_game() -> void:
 	drag_active = false
 	game_over = false
 	winner = 0
+	dev_paused = false
 	level = LEVELS[difficulty]
 	ai_timer = level["interval"]
 	state = State.PLAYING
@@ -152,6 +168,31 @@ func _menu_offset() -> float:
 	return maxf(0.0, (map_size.y - DESIGN_SIZE.y) * 0.5)
 
 
+func _panel_rect() -> Rect2:
+	var h := 3.0 * 70.0 + 20.0
+	return Rect2(0.0, map_size.y - h, map_size.x, h)
+
+
+# Knöpfe des Developer-Panels (3 Reihen à 4 Knöpfe)
+func _dev_buttons() -> Array:
+	var p := _panel_rect()
+	var bw := (map_size.x - 50.0) / 4.0
+	var rows := [
+		[["dev_pause", "Weiter" if dev_paused else "Pause"],
+			["dev_speed", "Tempo x" + SPEED_LABELS[dev_speed_index]],
+			["dev_ai", "KI: aus" if dev_ai_frozen else "KI: an"],
+			["dev_info", "Infos: an" if dev_info else "Infos: aus"]],
+		[["dev_map", "Neue Karte"], ["dev_level", "Gegner +"], ["dev_win", "Sieg"], ["dev_lose", "Niederlage"]],
+		[["dev_tool_owner", "Besitzer"], ["dev_tool_plus", "+10"], ["dev_tool_minus", "-10"], ["dev_tool_off", "Werkzeug aus"]],
+	]
+	var list := []
+	for r in rows.size():
+		for c in rows[r].size():
+			list.append({"id": rows[r][c][0], "label": rows[r][c][1], "sub": "", "size": 22,
+				"rect": Rect2(10.0 + c * (bw + 10.0), p.position.y + 10.0 + r * 70.0, bw, 60.0)})
+	return list
+
+
 # Liefert die aktuell sichtbaren Knöpfe als [{id, rect, label, sub}]
 func _buttons() -> Array:
 	var list := []
@@ -167,12 +208,18 @@ func _buttons() -> Array:
 		list.append({"id": "minus", "rect": Rect2(cx - bw * 0.5, row_y, 110.0, 84.0), "label": "-", "sub": ""})
 		list.append({"id": "plus", "rect": Rect2(cx + bw * 0.5 - 110.0, row_y, 110.0, 84.0), "label": "+", "sub": ""})
 		list.append({"id": "start", "rect": Rect2(cx - bw * 0.5, off + 1020.0, bw, 120.0), "label": "Spiel starten", "sub": ""})
+		list.append({"id": "dev_toggle", "rect": Rect2(cx - bw * 0.5, off + 1160.0, bw, 60.0),
+			"label": "Developer Mode: " + ("An" if dev_mode else "Aus"), "sub": "", "size": 22})
 	elif game_over:
 		var bw := 400.0
 		list.append({"id": "again", "rect": Rect2(cx - bw * 0.5, map_size.y * 0.5 + 110.0, bw, 90.0), "label": "Nochmal", "sub": ""})
 		list.append({"id": "tomenu", "rect": Rect2(cx - bw * 0.5, map_size.y * 0.5 + 220.0, bw, 90.0), "label": "Menü", "sub": ""})
 	else:
 		list.append({"id": "menu", "rect": Rect2(map_size.x - 170.0, 16.0, 150.0, 56.0), "label": "Menü", "sub": ""})
+		if dev_mode:
+			list.append({"id": "dev", "rect": Rect2(map_size.x - 340.0, 16.0, 150.0, 56.0), "label": "DEV", "sub": ""})
+			if dev_open:
+				list.append_array(_dev_buttons())
 	return list
 
 
@@ -181,6 +228,21 @@ func _button_at(pos: Vector2) -> String:
 		if b["rect"].has_point(pos):
 			return b["id"]
 	return ""
+
+
+# Ist ein Schalter-Knopf gerade "an"? (für die Hervorhebung)
+func _is_active(id: String) -> bool:
+	match id:
+		"dev": return dev_open
+		"dev_pause": return dev_paused
+		"dev_ai": return dev_ai_frozen
+		"dev_info": return dev_info
+		"dev_toggle": return dev_mode
+		"dev_tool_owner": return dev_tool == "owner"
+		"dev_tool_plus": return dev_tool == "plus"
+		"dev_tool_minus": return dev_tool == "minus"
+		"dev_tool_off": return dev_tool == ""
+	return false
 
 
 func _activate(id: String) -> void:
@@ -200,9 +262,71 @@ func _activate(id: String) -> void:
 			drag_active = false
 			selected = -1
 			_update_size()
+		"dev_toggle":
+			dev_mode = not dev_mode
+			_reset_dev()
+			_save_settings()
+		"dev":
+			dev_open = not dev_open
+		"dev_pause":
+			dev_paused = not dev_paused
+		"dev_speed":
+			dev_speed_index = (dev_speed_index + 1) % SPEEDS.size()
+		"dev_ai":
+			dev_ai_frozen = not dev_ai_frozen
+		"dev_info":
+			dev_info = not dev_info
+		"dev_map":
+			start_game()
+		"dev_level":
+			difficulty = (difficulty + 1) % LEVELS.size()
+			level = LEVELS[difficulty]
+			ai_timer = level["interval"]
+		"dev_win":
+			_force_end(1)
+		"dev_lose":
+			_force_end(2)
+		"dev_tool_owner":
+			dev_tool = "owner"
+		"dev_tool_plus":
+			dev_tool = "plus"
+		"dev_tool_minus":
+			dev_tool = "minus"
+		"dev_tool_off":
+			dev_tool = ""
 		_:
-			if id.begins_with("d"):
+			if id.begins_with("d") and id.length() == 2:
 				difficulty = int(id.substr(1))
+
+
+func _reset_dev() -> void:
+	dev_open = false
+	dev_paused = false
+	dev_speed_index = 1
+	dev_ai_frozen = false
+	dev_info = false
+	dev_tool = ""
+
+
+func _force_end(winning_owner: int) -> void:
+	game_over = true
+	winner = winning_owner
+	drag_active = false
+	selected = -1
+
+
+# Developer-Werkzeug auf einen Kreis anwenden: Besitzer wechseln, +10 / -10 Armee
+func _apply_dev_tool(i: int) -> void:
+	if i < 0:
+		return
+	var c: Dictionary = circles[i]
+	match dev_tool:
+		"owner":
+			c["owner"] = (int(c["owner"]) + 1) % 3
+		"plus":
+			c["value"] += 10.0
+		"minus":
+			c["value"] = maxf(1.0, c["value"] - 10.0)
 
 
 # ---------- Eingabe ----------
@@ -225,6 +349,11 @@ func _on_press(pos: Vector2) -> void:
 		return
 	if state != State.PLAYING or game_over:
 		return
+	if dev_mode and dev_open and _panel_rect().has_point(pos):
+		return  # Berührungen auf dem Panel gehen nicht ins Spielfeld durch
+	if dev_mode and dev_tool != "":
+		_apply_dev_tool(_circle_at(pos))
+		return
 	drag_active = true
 	drag_pos = pos
 	press_index = _circle_at(pos)
@@ -246,7 +375,7 @@ func _on_release(pos: Vector2) -> void:
 	if state != State.PLAYING or game_over:
 		return
 
-	var target := _circle_at(pos)
+	var target := _circle_at(pos, RELEASE_SNAP)
 	if press_index >= 0 and circles[press_index]["owner"] == 1:
 		if target == press_index:
 			# Tippen: Anteil der Armee umschalten (25, 50, 75, 100 %)
@@ -259,35 +388,52 @@ func _on_release(pos: Vector2) -> void:
 	queue_redraw()
 
 
-func _circle_at(pos: Vector2) -> int:
+# Trefferradius eines Kreises: sichtbarer Kreis plus Rand, mindestens MIN_HIT_RADIUS
+func _hit_radius(c: Dictionary) -> float:
+	return maxf(c["radius"] + TAP_TOLERANCE, MIN_HIT_RADIUS)
+
+
+# Kreis an dieser Position. extra erweitert die Trefferfläche (beim Loslassen).
+# Bei mehreren Treffern gewinnt der Kreis mit dem kleinsten Abstand zu seinem Rand.
+func _circle_at(pos: Vector2, extra: float = 0.0) -> int:
+	var best := -1
+	var best_gap := INF
 	for i in circles.size():
-		if pos.distance_to(circles[i]["pos"]) <= circles[i]["radius"] + TAP_TOLERANCE:
-			return i
-	return -1
+		var gap: float = pos.distance_to(circles[i]["pos"]) - _hit_radius(circles[i])
+		if gap <= extra and gap < best_gap:
+			best_gap = gap
+			best = i
+	return best
 
 
 # ---------- Spielregeln ----------
 
+# Menge, die ein Anteil der Armee von src ergibt (mindestens 1, höchstens alles)
+func _amount_for(src: int, fraction: float) -> float:
+	var v: float = floorf(circles[src]["value"])
+	return clampf(floorf(circles[src]["value"] * fraction), 1.0, maxf(v, 1.0))
+
+
 # Sendet einen Anteil der Armee von src nach dst.
 func _try_send(owner: int, src: int, dst: int, fraction: float) -> bool:
-	return _send_amount(owner, src, dst, floorf(circles[src]["value"] * fraction))
+	if src < 0 or src >= circles.size():
+		return false
+	return _send_amount(owner, src, dst, _amount_for(src, fraction))
 
 
-# Angriffe brauchen mehr Armee als das Ziel, Verstärkung eigener Kreise geht immer.
+# Man darf jederzeit senden. Ist die Armee kleiner als das Ziel, wird sie bei der
+# Ankunft einfach von dessen Armee abgezogen.
 func _send_amount(owner: int, src: int, dst: int, amount: float) -> bool:
 	if src == dst or circles[src]["owner"] != owner:
 		return false
 	amount = minf(amount, floorf(circles[src]["value"]))
 	if amount < 1.0:
 		return false
-	var dst_circle: Dictionary = circles[dst]
-	if dst_circle["owner"] != owner and amount <= dst_circle["value"]:
-		return false
 
 	circles[src]["value"] -= amount
 	armies.append({
 		"from": circles[src]["pos"],
-		"to": dst_circle["pos"],
+		"to": circles[dst]["pos"],
 		"owner": owner,
 		"amount": amount,
 		"target": dst,
@@ -329,8 +475,8 @@ func _check_winner() -> void:
 # ---------- Ablauf ----------
 
 func _process(delta: float) -> void:
-	if state == State.PLAYING and not game_over:
-		_tick(delta)
+	if state == State.PLAYING and not game_over and not dev_paused:
+		_tick(delta * SPEEDS[dev_speed_index])
 	queue_redraw()
 
 
@@ -350,10 +496,11 @@ func _tick(delta: float) -> void:
 			armies.erase(army)
 			_resolve(army)
 
-	ai_timer -= delta
-	if ai_timer <= 0.0:
-		ai_timer = level["interval"]
-		_ai_think()
+	if not dev_ai_frozen:
+		ai_timer -= delta
+		if ai_timer <= 0.0:
+			ai_timer = level["interval"]
+			_ai_think()
 
 	_check_winner()
 
@@ -376,7 +523,7 @@ func _ai_think() -> void:
 			break
 
 
-# Kiesel: zufälliger Kreis greift ein zufälliges Ziel an, nur wenn es klappt
+# Kiesel: zufälliger Kreis schickt einen Teil seiner Armee auf ein zufälliges Ziel
 func _ai_random(own: Array, others: Array) -> void:
 	var src: int = own[rng.randi() % own.size()]
 	var dst: int = others[rng.randi() % others.size()]
@@ -453,12 +600,10 @@ func _text(font: Font, y: float, text: String, size: int, color: Color) -> void:
 	draw_string(font, Vector2(0.0, y), text, HORIZONTAL_ALIGNMENT_CENTER, map_size.x, size, color)
 
 
-func _draw_button(font: Font, b: Dictionary, selected_btn: bool, pressed: bool, primary: bool) -> void:
+func _draw_button(font: Font, b: Dictionary, active: bool, pressed: bool, primary: bool) -> void:
 	var r: Rect2 = b["rect"]
 	var fill := Color("#232a36")
-	if primary:
-		fill = Color("#2d7ff9")
-	if selected_btn:
+	if primary or active:
 		fill = Color("#2d7ff9")
 	if pressed:
 		fill = fill.lightened(0.2)
@@ -466,12 +611,13 @@ func _draw_button(font: Font, b: Dictionary, selected_btn: bool, pressed: bool, 
 	draw_rect(r, Color(1, 1, 1, 0.25), false, 2.0)
 	var label: String = b["label"]
 	var sub: String = b["sub"]
+	var fs: int = b.get("size", 34)
 	if sub == "":
-		draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + 12.0), label,
-			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 34, Color.WHITE)
+		draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + fs * 0.35), label,
+			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, Color.WHITE)
 	else:
 		draw_string(font, Vector2(r.position.x, r.position.y + 42.0), label,
-			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 34, Color.WHITE)
+			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, Color.WHITE)
 		draw_string(font, Vector2(r.position.x, r.position.y + 74.0), "Gegner: " + sub,
 			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 22, Color(1, 1, 1, 0.75))
 
@@ -493,8 +639,8 @@ func _draw_menu(font: Font) -> void:
 
 	for b in _buttons():
 		var id: String = b["id"]
-		var is_selected := id == "d%d" % difficulty
-		_draw_button(font, b, is_selected, id == press_button, id == "start")
+		var active := id == "d%d" % difficulty or _is_active(id)
+		_draw_button(font, b, active, id == press_button, id == "start")
 
 	_text(font, off + 818.0, level_info(), 22, Color(1, 1, 1, 0.85))
 	_text(font, off + 872.0, "Anzahl Kreise", 24, Color(1, 1, 1, 0.7))
@@ -505,23 +651,50 @@ func level_info() -> String:
 	return LEVELS[difficulty]["name"] + ": " + LEVELS[difficulty]["info"]
 
 
+# Armee unterwegs: kleines Dreieck in Bewegungsrichtung mit der Zahl darüber
+func _draw_army(font: Font, a: Dictionary) -> void:
+	var p: Vector2 = a["from"].lerp(a["to"], a["progress"])
+	var dir: Vector2 = (a["to"] - a["from"]).normalized()
+	var perp := Vector2(-dir.y, dir.x)
+	var s: float = clampf(8.0 + sqrt(a["amount"]) * 1.6, 10.0, 22.0)
+	var tri := PackedVector2Array([
+		p + dir * s * 1.3,
+		p - dir * s * 0.8 + perp * s * 0.85,
+		p - dir * s * 0.8 - perp * s * 0.85,
+	])
+	draw_colored_polygon(tri, COLORS[a["owner"]])
+	draw_polyline(PackedVector2Array([tri[0], tri[1], tri[2], tri[0]]), Color(1, 1, 1, 0.9), 2.0)
+	draw_string(font, p + Vector2(-20.0, -s - 6.0), str(int(a["amount"])),
+		HORIZONTAL_ALIGNMENT_CENTER, 40, 20, Color.WHITE)
+
+
 func _draw_game(font: Font) -> void:
 	for i in circles.size():
 		var c: Dictionary = circles[i]
 		draw_circle(c["pos"], c["radius"], COLORS[c["owner"]])
 		if i == selected:
 			draw_arc(c["pos"], c["radius"] + 8.0, 0.0, TAU, 48, Color.WHITE, 3.0)
-		draw_string(font, c["pos"] + Vector2(-c["radius"], 10.0), str(int(c["value"])),
-			HORIZONTAL_ALIGNMENT_CENTER, c["radius"] * 2.0, 28, Color.WHITE)
+		var label := "%.1f" % c["value"] if (dev_mode and dev_info) else str(int(c["value"]))
+		var label_size := 24 if (dev_mode and dev_info) else 28
+		draw_string(font, c["pos"] + Vector2(-c["radius"], label_size * 0.35), label,
+			HORIZONTAL_ALIGNMENT_CENTER, c["radius"] * 2.0, label_size, Color.WHITE)
+		if dev_mode and dev_info:
+			draw_arc(c["pos"], _hit_radius(c), 0.0, TAU, 48, Color(1, 1, 0, 0.35), 1.5)
 
 	for a in armies:
-		var p: Vector2 = a["from"].lerp(a["to"], a["progress"])
-		draw_circle(p, 9.0, COLORS[a["owner"]])
-		draw_string(font, p + Vector2(-20, -14), str(int(a["amount"])),
-			HORIZONTAL_ALIGNMENT_CENTER, 40, 20, Color.WHITE)
+		_draw_army(font, a)
 
 	if drag_active and selected >= 0:
-		draw_line(circles[selected]["pos"], drag_pos, Color(1, 1, 1, 0.5), 3.0)
+		var end := drag_pos
+		var hover := _circle_at(drag_pos, RELEASE_SNAP)
+		if hover >= 0 and hover != selected:
+			var hc: Dictionary = circles[hover]
+			end = hc["pos"]
+			draw_arc(hc["pos"], hc["radius"] + 10.0, 0.0, TAU, 48, Color.WHITE, 3.0)
+			draw_string(font, hc["pos"] + Vector2(-60.0, -hc["radius"] - 18.0),
+				"-> %d" % int(_amount_for(selected, FRACTIONS[fraction_index])),
+				HORIZONTAL_ALIGNMENT_CENTER, 120, 24, Color.WHITE)
+		draw_line(circles[selected]["pos"], end, Color(1, 1, 1, 0.5), 3.0)
 
 	var player_count := _indices_with_owner(1).size()
 	var enemy_count := _indices_with_owner(2).size()
@@ -532,9 +705,15 @@ func _draw_game(font: Font) -> void:
 		"Anteil: %d %%  (eigenen Kreis antippen)" % int(FRACTIONS[fraction_index] * 100),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 1, 0.8))
 
-	for b in _buttons():
-		if b["id"] == "menu":
-			_draw_button(font, b, false, "menu" == press_button, false)
+	if dev_mode:
+		_draw_dev_overlay(font)
+
+	if not game_over:
+		if dev_mode and dev_open:
+			draw_rect(_panel_rect(), Color(0, 0, 0, 0.78), true)
+		for b in _buttons():
+			var id: String = b["id"]
+			_draw_button(font, b, _is_active(id), id == press_button, false)
 
 	if game_over:
 		draw_rect(Rect2(Vector2.ZERO, map_size), Color(0, 0, 0, 0.6), true)
@@ -543,3 +722,32 @@ func _draw_game(font: Font) -> void:
 		_text(font, map_size.y * 0.5 + 30.0, "%s (%s)" % [level["label"], level["name"]], 26, Color(1, 1, 1, 0.8))
 		for b in _buttons():
 			_draw_button(font, b, false, b["id"] == press_button, b["id"] == "again")
+
+
+# Developer-Anzeigen: Werkzeug, Pause und (optional) Diagnosewerte
+func _draw_dev_overlay(font: Font) -> void:
+	var y := 102.0
+	if dev_tool != "":
+		draw_string(font, Vector2(20, y), "Werkzeug: " + dev_tool_label() + " (Kreis antippen)",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color("#ffd23f"))
+		y += 26.0
+	if dev_info:
+		var lines := [
+			"FPS %d   Kreise %d   Armeen unterwegs %d" % [Engine.get_frames_per_second(), circles.size(), armies.size()],
+			"KI %s: alle %.1fs, nächste in %.1fs%s" % [level["name"], level["interval"], maxf(ai_timer, 0.0),
+				" (eingefroren)" if dev_ai_frozen else ""],
+			"Tempo x%s   Wachstum KI x%.2f" % [SPEED_LABELS[dev_speed_index], level["growth"]],
+		]
+		for line in lines:
+			draw_string(font, Vector2(20, y), line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color("#ffd23f"))
+			y += 24.0
+	if dev_paused:
+		_text(font, map_size.y * 0.5, "PAUSE", 56, Color(1, 1, 1, 0.5))
+
+
+func dev_tool_label() -> String:
+	match dev_tool:
+		"owner": return "Besitzer wechseln"
+		"plus": return "+10 Armee"
+		"minus": return "-10 Armee"
+	return ""

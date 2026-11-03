@@ -6,7 +6,8 @@ Echtzeit-Strategie mit Kreisen für das Handy (Godot 4.3). Zwei Kontrahenten kä
 
 - Zufällig verteilte Kreise (Startwert 5 bis 20, Größe hängt vom Wert ab), die Startkreise haben 15
 - Besetzte Kreise bekommen laufend Armee dazu
-- Angriff nur, wenn die entsandte Armee größer ist als die Armee auf dem Ziel
+- Man kann jederzeit Armee senden. Ist sie kleiner als die Armee auf dem Ziel, wird sie bei der Ankunft davon abgezogen; ist sie größer, wird der Kreis erobert
+- Armeen unterwegs erscheinen als kleine Dreiecke mit ihrer Stärke, im Kreis steht die Zahl
 
 ## Menü
 
@@ -19,6 +20,16 @@ Echtzeit-Strategie mit Kreisen für das Handy (Godot 4.3). Zwei Kontrahenten kä
 - **Wischen:** von einem eigenen Kreis auf ein Ziel ziehen, um Armee zu entsenden
 - **Tippen auf einen eigenen Kreis:** Anteil der entsendeten Armee umschalten (25, 50, 75, 100 %)
 - **Menü-Knopf** oben rechts bricht die Partie ab; nach dem Ende gibt es „Nochmal“ und „Menü“
+
+## Developer Mode
+
+Im Menü unten mit „Developer Mode“ einschalten (wird gespeichert). Im Spiel erscheint oben der Knopf **DEV**, der ein Panel öffnet:
+
+- **Pause / Weiter**, **Tempo** (x0.5, x1, x2, x4)
+- **KI: an/aus** friert die Entscheidungen des Gegners ein
+- **Infos:** FPS, Armeen unterwegs, KI-Takt, genaue Armeewerte mit Nachkommastellen und die Trefferflächen der Kreise
+- **Neue Karte**, **Gegner +** (Stufe live wechseln), **Sieg** und **Niederlage** erzwingen (zum Testen des Endbildschirms)
+- **Werkzeuge** (danach Kreis antippen): Besitzer wechseln, +10 oder -10 Armee
 
 ## Gegner einstellen
 
