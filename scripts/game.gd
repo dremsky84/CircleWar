@@ -12,7 +12,7 @@ const GAP := 28.0              # Mindestabstand zwischen Kreisrändern
 const START_VALUE := 15.0      # Startarmee beider Spieler
 const ARMY_SPEED := 160.0      # Pixel pro Sekunde für entsendete Armeen
 const BASE_GROWTH := 1.0       # Armee pro Sekunde auf einem besetzten Kreis
-const FRACTIONS := [0.25, 0.5, 0.75, 1.0]
+const SEND_FRACTION := 0.5     # Anteil der vorhandenen Armee, der pro Wischen gesendet wird
 const TAP_TOLERANCE := 16.0    # Trefferfläche = sichtbarer Kreis + dieser Rand
 const MIN_HIT_RADIUS := 56.0   # auch kleine Kreise sind mindestens so gut treffbar
 const RELEASE_SNAP := 30.0     # beim Loslassen zählt ein Kreis auch knapp daneben
@@ -38,14 +38,14 @@ const LEVELS := [
 	{"label": "Sehr leicht", "name": "Kiesel", "mode": "random", "interval": 5.0,
 		"growth": 0.6, "margin": 1.0, "share": 0.5, "bonus": 1.0, "attacks": 1,
 		"info": "Greift selten und planlos an, wächst langsamer."},
-	{"label": "Leicht", "name": "Wächter", "mode": "attack", "interval": 3.0,
-		"growth": 0.85, "margin": 1.6, "share": 0.0, "bonus": 1.0, "attacks": 1,
+	{"label": "Leicht", "name": "Wächter", "mode": "attack", "interval": 3.5,
+		"growth": 0.75, "margin": 1.6, "share": 0.0, "bonus": 1.0, "attacks": 1,
 		"info": "Greift nur an, wenn der Sieg sicher ist."},
-	{"label": "Mittel", "name": "Sturm", "mode": "attack", "interval": 3.4,
-		"growth": 1.0, "margin": 1.4, "share": 0.7, "bonus": 1.3, "attacks": 1,
+	{"label": "Mittel", "name": "Sturm", "mode": "attack", "interval": 3.8,
+		"growth": 0.9, "margin": 1.4, "share": 0.7, "bonus": 1.3, "attacks": 1,
 		"info": "Angriffslustig und schickt fast alles los."},
-	{"label": "Schwer", "name": "Stratege", "mode": "attack", "interval": 0.8,
-		"growth": 1.1, "margin": 1.1, "share": 0.0, "bonus": 1.5, "attacks": 2,
+	{"label": "Schwer", "name": "Stratege", "mode": "attack", "interval": 1.0,
+		"growth": 1.0, "margin": 1.1, "share": 0.0, "bonus": 1.5, "attacks": 2,
 		"info": "Wählt günstige Ziele und rechnet genau."},
 	{"label": "Unspielbar", "name": "Kollektiv", "mode": "attack", "interval": 0.5,
 		"growth": 1.3, "margin": 1.1, "share": 0.0, "bonus": 2.0, "attacks": 3,
@@ -66,7 +66,6 @@ var press_index := -1
 var press_button := ""
 var drag_active := false
 var drag_pos := Vector2.ZERO
-var fraction_index := 1
 var ai_timer := 0.0
 var level: Dictionary = LEVELS[2]
 var game_over := false
@@ -377,11 +376,8 @@ func _on_release(pos: Vector2) -> void:
 
 	var target := _circle_at(pos, RELEASE_SNAP)
 	if press_index >= 0 and circles[press_index]["owner"] == 1:
-		if target == press_index:
-			# Tippen: Anteil der Armee umschalten (25, 50, 75, 100 %)
-			fraction_index = (fraction_index + 1) % FRACTIONS.size()
-		elif target >= 0:
-			_try_send(1, press_index, target, FRACTIONS[fraction_index])
+		if target >= 0 and target != press_index:
+			_try_send(1, press_index, target, SEND_FRACTION)
 	else:
 		selected = -1
 	press_index = -1
@@ -692,7 +688,7 @@ func _draw_game(font: Font) -> void:
 			end = hc["pos"]
 			draw_arc(hc["pos"], hc["radius"] + 10.0, 0.0, TAU, 48, Color.WHITE, 3.0)
 			draw_string(font, hc["pos"] + Vector2(-60.0, -hc["radius"] - 18.0),
-				"-> %d" % int(_amount_for(selected, FRACTIONS[fraction_index])),
+				"-> %d" % int(_amount_for(selected, SEND_FRACTION)),
 				HORIZONTAL_ALIGNMENT_CENTER, 120, 24, Color.WHITE)
 		draw_line(circles[selected]["pos"], end, Color(1, 1, 1, 0.5), 3.0)
 
@@ -702,7 +698,7 @@ func _draw_game(font: Font) -> void:
 		"Du: %d   %s: %d" % [player_count, level["name"], enemy_count],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color.WHITE)
 	draw_string(font, Vector2(20, 76),
-		"Anteil: %d %%  (eigenen Kreis antippen)" % int(FRACTIONS[fraction_index] * 100),
+		"Wischen sendet %d %% der Armee" % int(SEND_FRACTION * 100),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 1, 0.8))
 
 	if dev_mode:

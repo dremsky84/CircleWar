@@ -62,8 +62,8 @@ func _play(lvl: int, count: int, seed_value: int, interval: float, margin: float
 		t += DT
 		bot_timer -= DT
 		if bot_timer <= 0.0:
-			bot_timer = interval
-			_bot_think(g, margin)
+			var swipes: int = _bot_think(g, margin)
+			bot_timer = interval * maxi(1, swipes)
 
 	var result := 0
 	if g.game_over:
@@ -73,12 +73,15 @@ func _play(lvl: int, count: int, seed_value: int, interval: float, margin: float
 	return [result, t]
 
 
-# Menschenähnlicher Spieler: nimmt den kleinsten Anteil (25/50/75/100 %), der reicht
-func _bot_think(g, margin: float) -> void:
+# Menschenähnlicher Spieler: jedes Wischen sendet 50 % der Armee des Quellkreises.
+# Reicht ein Wischen nicht, wischt er bis zu dreimal hintereinander auf dasselbe Ziel
+# (die Teilarmeen werden bei der Ankunft nacheinander abgezogen).
+# Rückgabe: Anzahl der Wischer (für die Zeit, die das kostet).
+func _bot_think(g, margin: float) -> int:
 	var best_score := -1.0
 	var best_src := -1
 	var best_dst := -1
-	var best_fraction := 1.0
+	var best_swipes := 1
 	for dst in g.circles.size():
 		if g.circles[dst]["owner"] == 1:
 			continue
@@ -90,14 +93,23 @@ func _bot_think(g, margin: float) -> void:
 			if g.circles[dst]["owner"] == 2:
 				need += g.BASE_GROWTH * g.level["growth"] * dist / g.ARMY_SPEED
 			need = need * margin + 1.0
-			for f in g.FRACTIONS:
-				if floorf(g.circles[src]["value"] * f) >= need:
-					var score := 1.0 / (need + dist / 80.0)
+			var remaining: float = g.circles[src]["value"]
+			var total := 0.0
+			for k in range(1, 4):
+				var part: float = clampf(floorf(remaining * g.SEND_FRACTION), 1.0, maxf(floorf(remaining), 1.0))
+				total += part
+				remaining -= part
+				if total >= need:
+					# mehrere Wischer kosten Zeit: schlechter bewerten
+					var score := 1.0 / (need + dist / 80.0) / k
 					if score > best_score:
 						best_score = score
 						best_src = src
 						best_dst = dst
-						best_fraction = f
+						best_swipes = k
 					break
-	if best_src >= 0:
-		g._try_send(1, best_src, best_dst, best_fraction)
+	if best_src < 0:
+		return 0
+	for i in best_swipes:
+		g._try_send(1, best_src, best_dst, g.SEND_FRACTION)
+	return best_swipes
