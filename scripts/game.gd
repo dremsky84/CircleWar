@@ -150,7 +150,7 @@ func _circle_at(pos: Vector2) -> int:
 func _try_send(owner: int, src: int, dst: int, fraction: float) -> bool:
 	if src == dst or circles[src]["owner"] != owner:
 		return false
-	var amount := floor(circles[src]["value"] * fraction)
+	var amount: float = floor(circles[src]["value"] * fraction)
 	if amount < 1:
 		return false
 	var dst_circle: Dictionary = circles[dst]
@@ -247,7 +247,7 @@ func _ai_think() -> void:
 		"Sturm":
 			# Aggressiv: stärkster Kreis greift den schwächsten erreichbaren an
 			var src := _biggest(own)
-			var dst := others[0]
+			var dst: int = others[0]
 			for o in others:
 				if circles[o]["value"] < circles[dst]["value"]:
 					dst = o

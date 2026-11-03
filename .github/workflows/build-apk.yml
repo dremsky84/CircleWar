@@ -15,11 +15,25 @@ jobs:
 
       - name: Export Android debug APK
         env:
-          GODOT_VERSION: 4.3.stable
+          # Im Container ist HOME sonst /github/home. Dort fehlen Export-Templates,
+          # Keystore und Android-SDK-Einstellungen, die das Image unter /root mitbringt.
+          HOME: /root
         run: |
+          set -x
+          ls /root/.local/share/godot/export_templates/ || true
+          ls /root/.config/godot/ || true
+          ls /root/*.keystore || true
+
+          # Debug-Keystore erzeugen, falls das Image keinen mitbringt
+          if [ ! -f /root/debug.keystore ]; then
+            keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android \
+              -keystore /root/debug.keystore -storepass android \
+              -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          fi
+
           mkdir -p build
-          godot --headless --verbose --export-debug "Android" build/echtzeit-strategie-debug.apk || true
-          test -f build/echtzeit-strategie-debug.apk
+          godot --headless --verbose --export-debug "Android" build/echtzeit-strategie-debug.apk
+          ls -la build
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
