@@ -1,0 +1,7 @@
+# Godot-Cache und lokale Dateien
+.godot/
+*.import
+build/
+*.apk
+*.aab
+*.keystore

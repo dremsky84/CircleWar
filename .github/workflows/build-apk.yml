@@ -1,0 +1,28 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export Android debug APK
+        env:
+          GODOT_VERSION: 4.3.stable
+        run: |
+          mkdir -p build
+          godot --headless --verbose --export-debug "Android" build/echtzeit-strategie-debug.apk || true
+          test -f build/echtzeit-strategie-debug.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: echtzeit-strategie-apk
+          path: build/echtzeit-strategie-debug.apk
