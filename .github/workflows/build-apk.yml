@@ -52,6 +52,8 @@ jobs:
           ls "$SDK/build-tools" "$SDK/platforms"
 
           mkdir -p build
+          # Ressourcen einmal importieren (frischer Checkout hat keinen .godot-Ordner)
+          godot --headless --import || true
           godot --headless --verbose --export-debug "Android" build/echtzeit-strategie-debug.apk
           ls -la build
 
