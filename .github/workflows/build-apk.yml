@@ -31,6 +31,26 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
           fi
 
+          # Android-SDK-Pfad aus den Editor-Einstellungen lesen
+          SDK=$(grep -oP 'export/android/android_sdk_path = "\K[^"]+' /root/.config/godot/editor_settings-4.3.tres || true)
+          echo "SDK=$SDK"
+          ls "$SDK" "$SDK/build-tools" "$SDK/platforms" || true
+          java -version
+
+          # Godot 4.3 verlangt Build-Tools 34 und Plattform android-34
+          SDKM=$(command -v sdkmanager || ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1 || true)
+          if [ -z "$SDKM" ]; then
+            curl -sSL -o /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            mkdir -p "$SDK/cmdline-tools"
+            unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
+            mv /tmp/cmdtools/cmdline-tools "$SDK/cmdline-tools/latest"
+            SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          echo "SDKM=$SDKM"
+          yes | "$SDKM" --sdk_root="$SDK" --licenses > /dev/null || true
+          "$SDKM" --sdk_root="$SDK" "platform-tools" "build-tools;34.0.0" "platforms;android-34"
+          ls "$SDK/build-tools" "$SDK/platforms"
+
           mkdir -p build
           godot --headless --verbose --export-debug "Android" build/echtzeit-strategie-debug.apk
           ls -la build
