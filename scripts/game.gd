@@ -1,9 +1,10 @@
 extends Node2D
 
 # CircleWar - Echtzeit-Strategie mit Kreisen
-# Menü (Schwierigkeit, Kreisanzahl) -> Partie gegen die KI -> Ergebnis
+# Hauptmenü -> Spielen (Einstellungen) oder Werkstatt (Verstärkungen, Armeetypen)
+# -> Partie gegen die KI -> Ergebnis mit Münzen
 
-enum State { MENU, PLAYING }
+enum State { MAIN, SETUP, WORKSHOP, PLAYING }
 
 const DESIGN_SIZE := Vector2(720, 1280)
 const EDGE_MARGIN := 80.0      # Abstand der Kreise zum seitlichen/unteren Rand
@@ -25,6 +26,7 @@ const SPEEDS := [0.5, 1.0, 2.0, 4.0]
 const SPEED_LABELS := ["0.5", "1", "2", "4"]
 
 const BG_COLOR := Color("#14181f")
+const GOLD := Color("#ffd23f")
 const COLORS := {
 	0: Color("#8a8f98"),  # neutral
 	1: Color("#2d7ff9"),  # Spieler
@@ -54,15 +56,50 @@ const LEVELS := [
 		"info": "Blitzschnell, greift mehrfach an und wächst schneller."},
 ]
 
-# Einstellungen (im Menü wählbar, werden gespeichert)
+# ---- Fortschritt ----
+# Verstärkungen: je 10 Stufen, jede Stufe +5 %. Preis der nächsten Stufe = UPGRADE_COSTS[Stufe].
+const MAX_LEVEL := 10
+const UPGRADE_STEP := 0.05
+const UPGRADE_COSTS := [100, 150, 200, 300, 400, 550, 700, 900, 1100, 1400]
+const UPGRADE_IDS := ["power", "speed", "growth"]
+const UPGRADE_INFO := {
+	"power": {"label": "Kraft", "desc": "Deine Armee zählt im Kampf mehr."},
+	"speed": {"label": "Tempo", "desc": "Deine Armeen sind schneller unterwegs."},
+	"growth": {"label": "Wachstum", "desc": "Deine Kreise bauen schneller Armee auf."},
+}
+
+# Armeetypen: power = Kraft, speed = Tempo (Faktoren, Standard = 1)
+const TYPE_IDS := ["standard", "tank", "star"]
+const TYPES := {
+	"standard": {"label": "Standard", "shape": "triangle", "shape_name": "Dreieck",
+		"power": 1.0, "speed": 1.0, "cost": 0, "desc": "Ausgewogen, alle Werte auf 1."},
+	"tank": {"label": "Tank", "shape": "square", "shape_name": "Quadrat",
+		"power": 1.3, "speed": 0.7, "cost": 500, "desc": "Mehr Schaden, aber langsamer."},
+	"star": {"label": "Schnell", "shape": "star", "shape_name": "Stern",
+		"power": 0.8, "speed": 1.4, "cost": 500, "desc": "Weniger Schaden, aber schneller."},
+}
+
+# Münzen pro Sieg je Schwierigkeit (bei 12 Kreisen)
+const REWARDS := [20, 40, 70, 110, 160]
+const LOSS_FACTOR := 0.25          # Niederlage gibt diesen Anteil
+const ENEMY_LEVEL_BONUS := 1.5     # Faktor, wenn "Gegner levelt mit" an ist
+const REWARD_REF_CIRCLES := 12.0   # Bezugsgröße für die Kreisanzahl
+
+# Einstellungen und Fortschritt (werden gespeichert)
 var difficulty := 2
 var circle_count := 12
 var dev_mode := false
+var enemy_levels_up := false
+var selected_type := "standard"
+var coins := 0
+var upgrade_levels := {"power": 0, "speed": 0, "growth": 0}
+var unlocked: Array = ["standard"]
 
-var state := State.MENU
+var state := State.MAIN
 var map_size := DESIGN_SIZE
 var circles: Array = []   # {pos, value, owner, radius}
 var armies: Array = []    # unterwegs: {from, to, owner, amount, target, progress}
+var stats: Dictionary = {}     # je Seite (1 = Spieler, 2 = Gegner): power, speed, growth, shape
 var selected := -1
 var press_index := -1
 var press_button := ""
@@ -74,9 +111,11 @@ var ai_timer := 0.0
 var level: Dictionary = LEVELS[2]
 var game_over := false
 var winner := 0
+var reward := 0                # Münzen der letzten Partie
+var reward_paid := false
 var rng := RandomNumberGenerator.new()
 
-# Developer Mode (nur aktiv, wenn im Menü eingeschaltet)
+# Developer Mode (nur aktiv, wenn im Hauptmenü eingeschaltet)
 var dev_open := false          # Panel sichtbar
 var dev_paused := false
 var dev_speed_index := 1
@@ -93,17 +132,31 @@ func _ready() -> void:
 
 
 func _update_size() -> void:
-	if is_inside_tree() and state == State.MENU:
+	if is_inside_tree() and state != State.PLAYING:
 		map_size = get_viewport_rect().size
 		queue_redraw()
 
 
+# ---------- Speichern ----------
+
 func _load_settings() -> void:
 	var cfg := ConfigFile.new()
-	if cfg.load(SETTINGS_PATH) == OK:
-		difficulty = clampi(int(cfg.get_value("game", "difficulty", difficulty)), 0, LEVELS.size() - 1)
-		circle_count = clampi(int(cfg.get_value("game", "circles", circle_count)), MIN_CIRCLES, MAX_CIRCLES)
-		dev_mode = bool(cfg.get_value("game", "dev", false))
+	if cfg.load(SETTINGS_PATH) != OK:
+		return
+	difficulty = clampi(int(cfg.get_value("game", "difficulty", difficulty)), 0, LEVELS.size() - 1)
+	circle_count = clampi(int(cfg.get_value("game", "circles", circle_count)), MIN_CIRCLES, MAX_CIRCLES)
+	dev_mode = bool(cfg.get_value("game", "dev", false))
+	enemy_levels_up = bool(cfg.get_value("game", "enemy_levels", false))
+	coins = maxi(0, int(cfg.get_value("progress", "coins", 0)))
+	for id in UPGRADE_IDS:
+		upgrade_levels[id] = clampi(int(cfg.get_value("progress", "lvl_" + id, 0)), 0, MAX_LEVEL)
+	unlocked = ["standard"]
+	var saved: Array = cfg.get_value("progress", "unlocked", ["standard"])
+	for tid in saved:
+		if TYPES.has(tid) and not (tid in unlocked):
+			unlocked.append(tid)
+	var type_id := str(cfg.get_value("game", "type", "standard"))
+	selected_type = type_id if (type_id in unlocked) else "standard"
 
 
 func _save_settings() -> void:
@@ -111,8 +164,115 @@ func _save_settings() -> void:
 	cfg.set_value("game", "difficulty", difficulty)
 	cfg.set_value("game", "circles", circle_count)
 	cfg.set_value("game", "dev", dev_mode)
+	cfg.set_value("game", "enemy_levels", enemy_levels_up)
+	cfg.set_value("game", "type", selected_type)
+	cfg.set_value("progress", "coins", coins)
+	for id in UPGRADE_IDS:
+		cfg.set_value("progress", "lvl_" + id, upgrade_levels[id])
+	cfg.set_value("progress", "unlocked", unlocked)
 	cfg.save(SETTINGS_PATH)
 
+
+# ---------- Verstärkungen, Typen, Münzen ----------
+
+func _upgrade_mult(id: String) -> float:
+	return 1.0 + UPGRADE_STEP * float(upgrade_levels[id])
+
+
+# Werte beider Seiten für die kommende Partie. Der Gegner hat Standardwerte
+# (mal Schwierigkeits-Wachstum); mit "Gegner levelt mit" bekommt er deine Verstärkungen.
+func _compute_stats() -> void:
+	var t: Dictionary = TYPES.get(selected_type, TYPES["standard"])
+	var e_power := 1.0
+	var e_speed := 1.0
+	var e_growth := 1.0
+	if enemy_levels_up:
+		e_power = _upgrade_mult("power")
+		e_speed = _upgrade_mult("speed")
+		e_growth = _upgrade_mult("growth")
+	var ai_growth: float = level["growth"]
+	stats = {
+		1: {"power": float(t["power"]) * _upgrade_mult("power"),
+			"speed": float(t["speed"]) * _upgrade_mult("speed"),
+			"growth": _upgrade_mult("growth"),
+			"shape": t["shape"]},
+		2: {"power": e_power, "speed": e_speed, "growth": ai_growth * e_growth,
+			"shape": "triangle"},
+	}
+
+
+func _stat(owner: int, key: String, fallback: float) -> float:
+	if owner == 0 or not stats.has(owner):
+		return fallback
+	return stats[owner][key]
+
+
+func _power(owner: int) -> float:
+	return _stat(owner, "power", 1.0)
+
+
+func _speed(owner: int) -> float:
+	return _stat(owner, "speed", 1.0)
+
+
+func _growth(owner: int) -> float:
+	return _stat(owner, "growth", 0.0)
+
+
+func _buy_upgrade(id: String) -> bool:
+	if not upgrade_levels.has(id):
+		return false
+	var lvl: int = upgrade_levels[id]
+	if lvl >= MAX_LEVEL:
+		return false
+	var cost: int = UPGRADE_COSTS[lvl]
+	if coins < cost:
+		return false
+	coins -= cost
+	upgrade_levels[id] = lvl + 1
+	_save_settings()
+	return true
+
+
+func _unlock_type(id: String) -> bool:
+	if not TYPES.has(id) or id in unlocked:
+		return false
+	var cost: int = TYPES[id]["cost"]
+	if coins < cost:
+		return false
+	coins -= cost
+	unlocked.append(id)
+	_save_settings()
+	return true
+
+
+# Münzen für eine Partie: Schwierigkeit, Sieg/Niederlage, Kreisanzahl, "Gegner levelt mit"
+func _reward_for(won: bool) -> int:
+	var base: float = REWARDS[difficulty]
+	if not won:
+		base *= LOSS_FACTOR
+	base *= float(circle_count) / REWARD_REF_CIRCLES
+	if enemy_levels_up:
+		base *= ENEMY_LEVEL_BONUS
+	return maxi(1, roundi(base))
+
+
+func _pay_reward() -> void:
+	reward_paid = true
+	reward = _reward_for(winner == 1)
+	coins += reward
+	_save_settings()
+
+
+# 1,3 statt 1.30
+func _fmt(v: float) -> String:
+	var s := "%.2f" % v
+	if s.contains("."):
+		s = s.rstrip("0").rstrip(".")
+	return s.replace(".", ",")
+
+
+# ---------- Spielstart ----------
 
 func start_game() -> void:
 	if is_inside_tree():
@@ -127,8 +287,11 @@ func start_game() -> void:
 	hold_time = 0.0
 	game_over = false
 	winner = 0
+	reward = 0
+	reward_paid = false
 	dev_paused = false
 	level = LEVELS[difficulty]
+	_compute_stats()
 	ai_timer = level["interval"]
 	state = State.PLAYING
 	_place_circles()
@@ -178,7 +341,12 @@ func _panel_rect() -> Rect2:
 	return Rect2(0.0, map_size.y - h, map_size.x, h)
 
 
-# Knöpfe des Developer-Panels (3 Reihen à 4 Knöpfe)
+func _btn(id: String, rect: Rect2, label: String, size: int = 34, lines: Array = [],
+		enabled: bool = true) -> Dictionary:
+	return {"id": id, "rect": rect, "label": label, "size": size, "lines": lines, "enabled": enabled}
+
+
+# Knöpfe des Developer-Panels im Spiel (3 Reihen à 4 Knöpfe)
 func _dev_buttons() -> Array:
 	var p := _panel_rect()
 	var bw := (map_size.x - 50.0) / 4.0
@@ -193,56 +361,130 @@ func _dev_buttons() -> Array:
 	var list := []
 	for r in rows.size():
 		for c in rows[r].size():
-			list.append({"id": rows[r][c][0], "label": rows[r][c][1], "sub": "", "size": 22,
-				"rect": Rect2(10.0 + c * (bw + 10.0), p.position.y + 10.0 + r * 70.0, bw, 60.0)})
+			list.append(_btn(rows[r][c][0],
+				Rect2(10.0 + c * (bw + 10.0), p.position.y + 10.0 + r * 70.0, bw, 60.0),
+				rows[r][c][1], 22))
 	return list
 
 
-# Liefert die aktuell sichtbaren Knöpfe als [{id, rect, label, sub}]
+# Zeilen der Werkstatt: 3 Verstärkungen, 2 freischaltbare Armeetypen
+func _workshop_rows() -> Array:
+	var rows := []
+	var off := _menu_offset()
+	var bw := minf(map_size.x - 40.0, 680.0)
+	var x := (map_size.x - bw) * 0.5
+	for i in UPGRADE_IDS.size():
+		var id: String = UPGRADE_IDS[i]
+		var lvl: int = upgrade_levels[id]
+		var maxed := lvl >= MAX_LEVEL
+		var cost := 0 if maxed else int(UPGRADE_COSTS[lvl])
+		rows.append({
+			"id": "buy_" + id,
+			"rect": Rect2(x, off + 205.0 + i * 120.0, bw, 110.0),
+			"title": UPGRADE_INFO[id]["label"],
+			"sub": "Stufe %d von %d  ·  aktuell ×%s" % [lvl, MAX_LEVEL, _fmt(_upgrade_mult(id))],
+			"desc": UPGRADE_INFO[id]["desc"],
+			"btn": "Max" if maxed else "Kaufen: %d" % cost,
+			"enabled": (not maxed) and coins >= cost,
+		})
+	var buyable := ["tank", "star"]
+	for i in buyable.size():
+		var tid: String = buyable[i]
+		var t: Dictionary = TYPES[tid]
+		var owned := tid in unlocked
+		var cost2: int = t["cost"]
+		rows.append({
+			"id": "unlock_" + tid,
+			"rect": Rect2(x, off + 635.0 + i * 120.0, bw, 110.0),
+			"title": "%s (%s)" % [t["label"], t["shape_name"]],
+			"sub": "Kraft ×%s  ·  Tempo ×%s" % [_fmt(t["power"]), _fmt(t["speed"])],
+			"desc": t["desc"],
+			"btn": "Freigeschaltet" if owned else "%d Münzen" % cost2,
+			"enabled": (not owned) and coins >= cost2,
+		})
+	return rows
+
+
+# Liefert die aktuell sichtbaren Knöpfe als [{id, rect, label, size, lines, enabled}]
 func _buttons() -> Array:
 	var list := []
 	var cx := map_size.x * 0.5
-	if state == State.MENU:
-		var off := _menu_offset()
-		var bw := minf(map_size.x - 80.0, 600.0)
-		for i in LEVELS.size():
-			list.append({"id": "d%d" % i,
-				"rect": Rect2(cx - bw * 0.5, off + 250.0 + i * 108.0, bw, 96.0),
-				"label": LEVELS[i]["label"], "sub": LEVELS[i]["name"]})
-		var row_y := off + 880.0
-		list.append({"id": "minus", "rect": Rect2(cx - bw * 0.5, row_y, 110.0, 84.0), "label": "-", "sub": ""})
-		list.append({"id": "plus", "rect": Rect2(cx + bw * 0.5 - 110.0, row_y, 110.0, 84.0), "label": "+", "sub": ""})
-		list.append({"id": "start", "rect": Rect2(cx - bw * 0.5, off + 1020.0, bw, 120.0), "label": "Spiel starten", "sub": ""})
-		list.append({"id": "dev_toggle", "rect": Rect2(cx - bw * 0.5, off + 1160.0, bw, 60.0),
-			"label": "Developer Mode: " + ("An" if dev_mode else "Aus"), "sub": "", "size": 22})
-	elif game_over:
-		var bw := 400.0
-		list.append({"id": "again", "rect": Rect2(cx - bw * 0.5, map_size.y * 0.5 + 110.0, bw, 90.0), "label": "Nochmal", "sub": ""})
-		list.append({"id": "tomenu", "rect": Rect2(cx - bw * 0.5, map_size.y * 0.5 + 220.0, bw, 90.0), "label": "Menü", "sub": ""})
-	else:
-		list.append({"id": "menu", "rect": Rect2(map_size.x - 170.0, 16.0, 150.0, 56.0), "label": "Menü", "sub": ""})
-		if dev_mode:
-			list.append({"id": "dev", "rect": Rect2(map_size.x - 340.0, 16.0, 150.0, 56.0), "label": "DEV", "sub": ""})
-			if dev_open:
-				list.append_array(_dev_buttons())
+	var off := _menu_offset()
+	var bw := minf(map_size.x - 80.0, 600.0)
+	match state:
+		State.MAIN:
+			list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 400.0, bw, 130.0), "Spielen", 44))
+			list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 560.0, bw, 110.0), "Werkstatt", 38))
+			if dev_mode:
+				var w := (bw - 20.0) / 3.0
+				list.append(_btn("dev_coins", Rect2(cx - bw * 0.5, off + 1070.0, w, 70.0), "+1000", 22, ["Münzen"]))
+				list.append(_btn("dev_unlock", Rect2(cx - bw * 0.5 + w + 10.0, off + 1070.0, w, 70.0), "Alles", 22, ["freischalten"]))
+				list.append(_btn("dev_reset", Rect2(cx - bw * 0.5 + 2.0 * (w + 10.0), off + 1070.0, w, 70.0), "Fortschritt", 22, ["zurücksetzen"]))
+			list.append(_btn("dev_toggle", Rect2(cx - bw * 0.5, off + 1160.0, bw, 60.0),
+				"Developer Mode: " + ("An" if dev_mode else "Aus"), 22))
+		State.SETUP:
+			list.append(_btn("back", Rect2(20.0, off + 16.0, 150.0, 56.0), "Zurück", 26))
+			for i in LEVELS.size():
+				list.append(_btn("d%d" % i, Rect2(cx - bw * 0.5, off + 198.0 + i * 84.0, bw, 76.0),
+					LEVELS[i]["label"], 28, ["Gegner: " + LEVELS[i]["name"]]))
+			var row_y := off + 712.0
+			list.append(_btn("minus", Rect2(cx - bw * 0.5, row_y, 110.0, 70.0), "-"))
+			list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, row_y, 110.0, 70.0), "+"))
+			var tw := (bw - 20.0) / 3.0
+			for i in TYPE_IDS.size():
+				var tid: String = TYPE_IDS[i]
+				var t: Dictionary = TYPES[tid]
+				var is_open := tid in unlocked
+				var lines := ["Kraft ×" + _fmt(t["power"]), "Tempo ×" + _fmt(t["speed"])] if is_open \
+					else ["gesperrt", "(Werkstatt)"]
+				var b := _btn("type_" + tid, Rect2(cx - bw * 0.5 + i * (tw + 10.0), off + 842.0, tw, 112.0),
+					t["label"], 26, lines, is_open)
+				b["shape"] = t["shape"]
+				list.append(b)
+			list.append(_btn("enemy_toggle", Rect2(cx - bw * 0.5, off + 966.0, bw, 76.0),
+				"Gegner levelt mit: " + ("An" if enemy_levels_up else "Aus"), 26,
+				["Gegner bekommt deine Verstärkungen, Münzen ×1,5"]))
+			list.append(_btn("start", Rect2(cx - bw * 0.5, off + 1058.0, bw, 108.0), "Spiel starten", 34))
+		State.WORKSHOP:
+			list.append(_btn("back", Rect2(20.0, off + 16.0, 150.0, 56.0), "Zurück", 26))
+			for row in _workshop_rows():
+				var r: Rect2 = row["rect"]
+				list.append(_btn(row["id"], Rect2(r.position.x + r.size.x - 210.0, r.position.y + 20.0, 190.0, 70.0),
+					row["btn"], 22, [], row["enabled"]))
+		State.PLAYING:
+			if game_over:
+				var gw := 400.0
+				list.append(_btn("again", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 110.0, gw, 90.0), "Nochmal"))
+				list.append(_btn("tomenu", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 220.0, gw, 90.0), "Menü"))
+			else:
+				list.append(_btn("menu", Rect2(map_size.x - 170.0, 16.0, 150.0, 56.0), "Menü"))
+				if dev_mode:
+					list.append(_btn("dev", Rect2(map_size.x - 340.0, 16.0, 150.0, 56.0), "DEV"))
+					if dev_open:
+						list.append_array(_dev_buttons())
 	return list
 
 
 func _button_at(pos: Vector2) -> String:
 	for b in _buttons():
-		if b["rect"].has_point(pos):
+		if b["enabled"] and b["rect"].has_point(pos):
 			return b["id"]
 	return ""
 
 
 # Ist ein Schalter-Knopf gerade "an"? (für die Hervorhebung)
 func _is_active(id: String) -> bool:
+	if id == "d%d" % difficulty:
+		return true
+	if id.begins_with("type_"):
+		return id.substr(5) == selected_type
 	match id:
 		"dev": return dev_open
 		"dev_pause": return dev_paused
 		"dev_ai": return dev_ai_frozen
 		"dev_info": return dev_info
 		"dev_toggle": return dev_mode
+		"enemy_toggle": return enemy_levels_up
 		"dev_tool_owner": return dev_tool == "owner"
 		"dev_tool_plus": return dev_tool == "plus"
 		"dev_tool_minus": return dev_tool == "minus"
@@ -252,6 +494,12 @@ func _is_active(id: String) -> bool:
 
 func _activate(id: String) -> void:
 	match id:
+		"go_setup":
+			state = State.SETUP
+		"go_workshop":
+			state = State.WORKSHOP
+		"back":
+			state = State.MAIN
 		"start":
 			_save_settings()
 			start_game()
@@ -259,10 +507,13 @@ func _activate(id: String) -> void:
 			circle_count = maxi(MIN_CIRCLES, circle_count - 1)
 		"plus":
 			circle_count = mini(MAX_CIRCLES, circle_count + 1)
+		"enemy_toggle":
+			enemy_levels_up = not enemy_levels_up
+			_save_settings()
 		"again":
 			start_game()
 		"menu", "tomenu":
-			state = State.MENU
+			state = State.MAIN
 			game_over = false
 			drag_active = false
 			selected = -1
@@ -270,6 +521,21 @@ func _activate(id: String) -> void:
 		"dev_toggle":
 			dev_mode = not dev_mode
 			_reset_dev()
+			_save_settings()
+		"dev_coins":
+			coins += 1000
+			_save_settings()
+		"dev_unlock":
+			unlocked = TYPE_IDS.duplicate()
+			for uid in UPGRADE_IDS:
+				upgrade_levels[uid] = MAX_LEVEL
+			_save_settings()
+		"dev_reset":
+			coins = 0
+			unlocked = ["standard"]
+			selected_type = "standard"
+			for uid in UPGRADE_IDS:
+				upgrade_levels[uid] = 0
 			_save_settings()
 		"dev":
 			dev_open = not dev_open
@@ -286,6 +552,7 @@ func _activate(id: String) -> void:
 		"dev_level":
 			difficulty = (difficulty + 1) % LEVELS.size()
 			level = LEVELS[difficulty]
+			_compute_stats()
 			ai_timer = level["interval"]
 		"dev_win":
 			_force_end(1)
@@ -300,7 +567,16 @@ func _activate(id: String) -> void:
 		"dev_tool_off":
 			dev_tool = ""
 		_:
-			if id.begins_with("d") and id.length() == 2:
+			if id.begins_with("buy_"):
+				_buy_upgrade(id.substr(4))
+			elif id.begins_with("unlock_"):
+				_unlock_type(id.substr(7))
+			elif id.begins_with("type_"):
+				var tid := id.substr(5)
+				if tid in unlocked:
+					selected_type = tid
+					_save_settings()
+			elif id.begins_with("d") and id.length() == 2:
 				difficulty = int(id.substr(1))
 
 
@@ -313,9 +589,12 @@ func _reset_dev() -> void:
 	dev_tool = ""
 
 
+# Developer: Partie sofort beenden (ohne Münzen)
 func _force_end(winning_owner: int) -> void:
 	game_over = true
 	winner = winning_owner
+	reward = 0
+	reward_paid = true
 	drag_active = false
 	selected = -1
 
@@ -486,15 +765,21 @@ func _send_amount(owner: int, src: int, dst: int, amount: float) -> bool:
 	return true
 
 
+# Kampf bei Ankunft. Beide Seiten zählen ihre Armee mal ihrer Kraft; die Differenz
+# entscheidet, der Rest wird in Armee der Siegerseite zurückgerechnet.
 func _resolve(army: Dictionary) -> void:
 	var dst: Dictionary = circles[army["target"]]
-	if dst["owner"] == army["owner"]:
+	var owner: int = army["owner"]
+	if dst["owner"] == owner:
 		dst["value"] += army["amount"]
-	elif army["amount"] > dst["value"]:
-		dst["owner"] = army["owner"]
-		dst["value"] = army["amount"] - dst["value"]
+		return
+	var atk: float = army["amount"] * _power(owner)
+	var dfn: float = dst["value"] * _power(dst["owner"])
+	if atk > dfn:
+		dst["owner"] = owner
+		dst["value"] = (atk - dfn) / _power(owner)
 	else:
-		dst["value"] -= army["amount"]
+		dst["value"] = (dfn - atk) / _power(dst["owner"])
 
 
 func _check_winner() -> void:
@@ -519,6 +804,8 @@ func _check_winner() -> void:
 # ---------- Ablauf ----------
 
 func _process(delta: float) -> void:
+	if state == State.PLAYING and game_over and not reward_paid:
+		_pay_reward()
 	if state == State.PLAYING and not game_over:
 		_update_hold(delta)
 	if state == State.PLAYING and not game_over and not dev_paused:
@@ -528,16 +815,14 @@ func _process(delta: float) -> void:
 
 # Ein Simulationsschritt (auch für Testläufe ohne Anzeige nutzbar)
 func _tick(delta: float) -> void:
-	var ai_growth: float = level["growth"]
 	for c in circles:
-		if c["owner"] == 1:
-			c["value"] += BASE_GROWTH * delta
-		elif c["owner"] == 2:
-			c["value"] += BASE_GROWTH * ai_growth * delta
+		var o: int = c["owner"]
+		if o != 0:
+			c["value"] += BASE_GROWTH * _growth(o) * delta
 
 	for army in armies.duplicate():
 		var dist: float = maxf(army["from"].distance_to(army["to"]), 1.0)
-		army["progress"] += ARMY_SPEED * delta / dist
+		army["progress"] += ARMY_SPEED * _speed(army["owner"]) * delta / dist
 		if army["progress"] >= 1.0:
 			armies.erase(army)
 			_resolve(army)
@@ -590,7 +875,7 @@ func _ai_attack(own: Array, others: Array) -> bool:
 	for dst in others:
 		for src in own:
 			var spare: float = circles[src]["value"] - 1.0
-			var need: float = _needed(src, dst) * margin + 1.0
+			var need: float = _needed(2, src, dst) * margin + 1.0
 			if spare < need:
 				continue
 			var dist: float = circles[src]["pos"].distance_to(circles[dst]["pos"])
@@ -611,17 +896,21 @@ func _ai_attack(own: Array, others: Array) -> bool:
 	return _send_amount(2, best_src, best_dst, amount)
 
 
-# Armee, die ein Angriff von src auf dst mindestens braucht (inkl. Wachstum unterwegs)
-func _needed(src: int, dst: int) -> float:
+# Armee (in Einheiten von owner), die ein Angriff von src auf dst mindestens braucht:
+# Zielarmee samt Wachstum unterwegs, mit Kraft beider Seiten verrechnet.
+func _needed(owner: int, src: int, dst: int, count_inflight: bool = true) -> float:
 	var dist: float = circles[src]["pos"].distance_to(circles[dst]["pos"])
 	var v: float = circles[dst]["value"]
 	var dst_owner: int = circles[dst]["owner"]
-	if dst_owner == 1:
-		v += BASE_GROWTH * dist / ARMY_SPEED
-	for a in armies:
-		if a["target"] == dst and a["owner"] == 2:
-			v -= a["amount"]
-	return maxf(v, 0.0)
+	var atk := _power(owner)
+	if dst_owner != 0 and dst_owner != owner:
+		v += BASE_GROWTH * _growth(dst_owner) * dist / (ARMY_SPEED * _speed(owner))
+	var eff := v * _power(dst_owner)
+	if count_inflight:
+		for a in armies:
+			if a["target"] == dst and a["owner"] == owner:
+				eff -= a["amount"] * atk
+	return maxf(eff, 0.0) / atk
 
 
 func _indices_with_owner(owner: int) -> Array:
@@ -648,68 +937,138 @@ func _text(font: Font, y: float, text: String, size: int, color: Color) -> void:
 
 func _draw_button(font: Font, b: Dictionary, active: bool, pressed: bool, primary: bool) -> void:
 	var r: Rect2 = b["rect"]
+	var enabled: bool = b.get("enabled", true)
 	var fill := Color("#232a36")
 	if primary or active:
 		fill = Color("#2d7ff9")
-	if pressed:
+	if not enabled:
+		fill = Color("#1a1f28")
+	elif pressed:
 		fill = fill.lightened(0.2)
 	draw_rect(r, fill, true)
-	draw_rect(r, Color(1, 1, 1, 0.25), false, 2.0)
+	draw_rect(r, Color(1, 1, 1, 0.25 if enabled else 0.1), false, 2.0)
+	var text_color := Color.WHITE if enabled else Color(1, 1, 1, 0.4)
 	var label: String = b["label"]
-	var sub: String = b["sub"]
+	var lines: Array = b.get("lines", [])
 	var fs: int = b.get("size", 34)
-	if sub == "":
+	var has_shape: bool = b.has("shape")
+	if has_shape:
+		_draw_shape(b["shape"], r.position + Vector2(r.size.x * 0.5, 20.0), Vector2.RIGHT, 9.0,
+			COLORS[1] if enabled else Color(0.45, 0.47, 0.5))
+	if lines.is_empty():
 		draw_string(font, Vector2(r.position.x, r.position.y + r.size.y * 0.5 + fs * 0.35), label,
-			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, Color.WHITE)
+			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, text_color)
 	else:
-		draw_string(font, Vector2(r.position.x, r.position.y + 42.0), label,
-			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, Color.WHITE)
-		draw_string(font, Vector2(r.position.x, r.position.y + 74.0), "Gegner: " + sub,
-			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 22, Color(1, 1, 1, 0.75))
+		var y := r.position.y + fs + 6.0 + (16.0 if has_shape else 0.0)
+		draw_string(font, Vector2(r.position.x, y), label,
+			HORIZONTAL_ALIGNMENT_CENTER, r.size.x, fs, text_color)
+		for i in lines.size():
+			draw_string(font, Vector2(r.position.x, y + 24.0 + 22.0 * i), lines[i],
+				HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 18, Color(text_color, text_color.a * 0.75))
 
 
 func _draw() -> void:
 	var font := ThemeDB.fallback_font
 	draw_rect(Rect2(Vector2.ZERO, map_size), BG_COLOR, true)
-	if state == State.MENU:
-		_draw_menu(font)
-	else:
-		_draw_game(font)
+	match state:
+		State.MAIN:
+			_draw_main(font)
+		State.SETUP:
+			_draw_setup(font)
+		State.WORKSHOP:
+			_draw_workshop(font)
+		State.PLAYING:
+			_draw_game(font)
 
 
-func _draw_menu(font: Font) -> void:
-	var off := _menu_offset()
-	_text(font, off + 120.0, "CircleWar", 64, Color.WHITE)
-	_text(font, off + 170.0, "Erobere alle Kreise", 26, Color(1, 1, 1, 0.7))
-	_text(font, off + 232.0, "Schwierigkeit", 24, Color(1, 1, 1, 0.7))
-
+func _draw_buttons(font: Font) -> void:
 	for b in _buttons():
 		var id: String = b["id"]
-		var active := id == "d%d" % difficulty or _is_active(id)
-		_draw_button(font, b, active, id == press_button, id == "start")
+		_draw_button(font, b, _is_active(id), id == press_button, id == "start" or id == "go_setup")
 
-	_text(font, off + 818.0, level_info(), 22, Color(1, 1, 1, 0.85))
-	_text(font, off + 872.0, "Anzahl Kreise", 24, Color(1, 1, 1, 0.7))
-	_text(font, off + 935.0, str(circle_count), 44, Color.WHITE)
+
+func _draw_coins(font: Font, off: float) -> void:
+	draw_string(font, Vector2(0.0, off + 52.0), "Münzen: %d" % coins,
+		HORIZONTAL_ALIGNMENT_RIGHT, map_size.x - 20.0, 28, GOLD)
+
+
+func _draw_main(font: Font) -> void:
+	var off := _menu_offset()
+	_text(font, off + 140.0, "CircleWar", 64, Color.WHITE)
+	_text(font, off + 190.0, "Erobere alle Kreise", 26, Color(1, 1, 1, 0.7))
+	_text(font, off + 330.0, "Münzen: %d" % coins, 40, GOLD)
+	_draw_buttons(font)
+	if dev_mode:
+		_text(font, off + 1058.0, "Developer", 18, Color(1, 1, 1, 0.5))
+
+
+func _draw_setup(font: Font) -> void:
+	var off := _menu_offset()
+	_text(font, off + 130.0, "Spielen", 48, Color.WHITE)
+	_draw_coins(font, off)
+	_text(font, off + 186.0, "Schwierigkeit", 22, Color(1, 1, 1, 0.7))
+	_draw_buttons(font)
+	_text(font, off + 646.0, level_info(), 20, Color(1, 1, 1, 0.85))
+	_text(font, off + 700.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
+	_text(font, off + 712.0 + 48.0, str(circle_count), 40, Color.WHITE)
+	_text(font, off + 832.0, "Armeetyp", 22, Color(1, 1, 1, 0.7))
+
+
+func _draw_workshop(font: Font) -> void:
+	var off := _menu_offset()
+	_text(font, off + 130.0, "Werkstatt", 48, Color.WHITE)
+	_draw_coins(font, off)
+	_text(font, off + 190.0, "Verstärkungen", 22, Color(1, 1, 1, 0.7))
+	_text(font, off + 620.0, "Armeetypen", 22, Color(1, 1, 1, 0.7))
+	for row in _workshop_rows():
+		var r: Rect2 = row["rect"]
+		draw_rect(r, Color("#1b2029"), true)
+		draw_rect(r, Color(1, 1, 1, 0.12), false, 2.0)
+		draw_string(font, r.position + Vector2(20, 38), row["title"], HORIZONTAL_ALIGNMENT_LEFT, -1, 30, Color.WHITE)
+		draw_string(font, r.position + Vector2(20, 68), row["sub"], HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 1, 0.85))
+		draw_string(font, r.position + Vector2(20, 94), row["desc"], HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(1, 1, 1, 0.6))
+	_draw_buttons(font)
+	_text(font, off + 950.0, "Münzen verdienst du in Partien.", 20, Color(1, 1, 1, 0.6))
 
 
 func level_info() -> String:
 	return LEVELS[difficulty]["name"] + ": " + LEVELS[difficulty]["info"]
 
 
-# Armee unterwegs: kleines Dreieck in Bewegungsrichtung mit der Zahl darüber
+# Form (Dreieck, Quadrat oder Stern) mit weißem Rand, "vorne" zeigt in Richtung dir
+func _draw_shape(shape: String, p: Vector2, dir: Vector2, s: float, color: Color) -> void:
+	var perp := Vector2(-dir.y, dir.x)
+	var pts := PackedVector2Array()
+	match shape:
+		"square":
+			var h := s * 0.95
+			pts = PackedVector2Array([
+				p + dir * h + perp * h, p + dir * h - perp * h,
+				p - dir * h - perp * h, p - dir * h + perp * h])
+		"star":
+			for i in 10:
+				var r := s * (1.35 if i % 2 == 0 else 0.6)
+				pts.append(p + dir.rotated(i * PI / 5.0) * r)
+		_:
+			pts = PackedVector2Array([
+				p + dir * s * 1.3,
+				p - dir * s * 0.8 + perp * s * 0.85,
+				p - dir * s * 0.8 - perp * s * 0.85])
+	draw_colored_polygon(pts, color)
+	var outline := pts.duplicate()
+	outline.append(pts[0])
+	draw_polyline(outline, Color(1, 1, 1, 0.9), 2.0)
+
+
+# Armee unterwegs: kleine Form (je nach Armeetyp) in Bewegungsrichtung, Zahl darüber
 func _draw_army(font: Font, a: Dictionary) -> void:
 	var p: Vector2 = a["from"].lerp(a["to"], a["progress"])
 	var dir: Vector2 = (a["to"] - a["from"]).normalized()
-	var perp := Vector2(-dir.y, dir.x)
 	var s: float = clampf(8.0 + sqrt(a["amount"]) * 1.6, 10.0, 22.0)
-	var tri := PackedVector2Array([
-		p + dir * s * 1.3,
-		p - dir * s * 0.8 + perp * s * 0.85,
-		p - dir * s * 0.8 - perp * s * 0.85,
-	])
-	draw_colored_polygon(tri, COLORS[a["owner"]])
-	draw_polyline(PackedVector2Array([tri[0], tri[1], tri[2], tri[0]]), Color(1, 1, 1, 0.9), 2.0)
+	var shape := "triangle"
+	if stats.has(a["owner"]):
+		shape = stats[a["owner"]]["shape"]
+	_draw_shape(shape, p, dir, s, COLORS[a["owner"]])
 	draw_string(font, p + Vector2(-20.0, -s - 6.0), str(int(a["amount"])),
 		HORIZONTAL_ALIGNMENT_CENTER, 40, 20, Color.WHITE)
 
@@ -745,11 +1104,11 @@ func _draw_game(font: Font) -> void:
 				var frac := float(pct - 50) / 50.0
 				draw_arc(hc["pos"], arc_r, 0.0, TAU, 64, Color(1, 1, 1, 0.2), 8.0)
 				if frac > 0.0:
-					draw_arc(hc["pos"], arc_r, -PI * 0.5, -PI * 0.5 + TAU * frac, 64, Color("#ffd23f"), 8.0)
+					draw_arc(hc["pos"], arc_r, -PI * 0.5, -PI * 0.5 + TAU * frac, 64, GOLD, 8.0)
 				draw_rect(Rect2(hc["pos"] + Vector2(-48.0, label_y - 68.0), Vector2(96.0, 74.0)),
 					Color(BG_COLOR, 0.88), true)
 				draw_string(font, hc["pos"] + Vector2(-60.0, label_y - 32.0), "%d %%" % pct,
-					HORIZONTAL_ALIGNMENT_CENTER, 120, 34, Color("#ffd23f"))
+					HORIZONTAL_ALIGNMENT_CENTER, 120, 34, GOLD)
 				label_y -= 8.0
 			draw_string(font, hc["pos"] + Vector2(-60.0, label_y),
 				"-> %d" % int(_amount_for_percent(selected, pct)),
@@ -780,6 +1139,8 @@ func _draw_game(font: Font) -> void:
 		var text := "Gewonnen!" if winner == 1 else "Verloren"
 		_text(font, map_size.y * 0.5 - 20.0, text, 64, Color.WHITE)
 		_text(font, map_size.y * 0.5 + 30.0, "%s (%s)" % [level["label"], level["name"]], 26, Color(1, 1, 1, 0.8))
+		if reward > 0:
+			_text(font, map_size.y * 0.5 + 78.0, "+%d Münzen" % reward, 30, GOLD)
 		for b in _buttons():
 			_draw_button(font, b, false, b["id"] == press_button, b["id"] == "again")
 
@@ -789,17 +1150,19 @@ func _draw_dev_overlay(font: Font) -> void:
 	var y := 102.0
 	if dev_tool != "":
 		draw_string(font, Vector2(20, y), "Werkzeug: " + dev_tool_label() + " (Kreis antippen)",
-			HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color("#ffd23f"))
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 20, GOLD)
 		y += 26.0
 	if dev_info:
 		var lines := [
 			"FPS %d   Kreise %d   Armeen unterwegs %d" % [Engine.get_frames_per_second(), circles.size(), armies.size()],
 			"KI %s: alle %.1fs, nächste in %.1fs%s" % [level["name"], level["interval"], maxf(ai_timer, 0.0),
 				" (eingefroren)" if dev_ai_frozen else ""],
-			"Tempo x%s   Wachstum KI x%.2f" % [SPEED_LABELS[dev_speed_index], level["growth"]],
+			"Tempo x%s   Wachstum KI x%.2f" % [SPEED_LABELS[dev_speed_index], _growth(2)],
+			"Du: Kraft x%.2f Tempo x%.2f Wachstum x%.2f" % [_power(1), _speed(1), _growth(1)],
+			"KI: Kraft x%.2f Tempo x%.2f" % [_power(2), _speed(2)],
 		]
 		for line in lines:
-			draw_string(font, Vector2(20, y), line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color("#ffd23f"))
+			draw_string(font, Vector2(20, y), line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, GOLD)
 			y += 24.0
 	if dev_paused:
 		_text(font, map_size.y * 0.5, "PAUSE", 56, Color(1, 1, 1, 0.5))

@@ -3,6 +3,7 @@ extends SceneTree
 # Entwickler-Werkzeug: lässt einen Bot-Spieler gegen jede Schwierigkeitsstufe spielen
 # und zählt die Siege. Aufruf (ohne Anzeige):
 #   godot --headless --path . -s tools/sim.gd -- games=40 circles=12 bot=2.5,1.3
+# optional: type=tank|star  upg=<Stufe 0-10>  enemy=1
 # bot=<Reaktionszeit in s>,<Sicherheitsfaktor>   (größer = langsamer/vorsichtiger)
 
 const Game := preload("res://scripts/game.gd")
@@ -15,6 +16,9 @@ func _initialize() -> void:
 	var circles := 12
 	var interval := 2.5
 	var margin := 1.3
+	var type_id := "standard"
+	var upg := 0
+	var enemy := false
 	for arg in OS.get_cmdline_user_args():
 		var kv := arg.split("=")
 		if kv.size() != 2:
@@ -22,6 +26,9 @@ func _initialize() -> void:
 		match kv[0]:
 			"games": games = int(kv[1])
 			"circles": circles = int(kv[1])
+			"type": type_id = kv[1]
+			"upg": upg = int(kv[1])
+			"enemy": enemy = kv[1] == "1"
 			"bot":
 				var parts := kv[1].split(",")
 				interval = float(parts[0])
@@ -34,7 +41,7 @@ func _initialize() -> void:
 		var timeouts := 0
 		var total_time := 0.0
 		for n in games:
-			var res := _play(lvl, circles, 1000 + n, interval, margin)
+			var res := _play(lvl, circles, 1000 + n, interval, margin, type_id, upg, enemy)
 			total_time += res[1]
 			match res[0]:
 				1: wins += 1
@@ -47,12 +54,17 @@ func _initialize() -> void:
 
 
 # Rückgabe: [Ergebnis (1 Sieg, 2 Niederlage, 0 Zeitüberschreitung), Spielzeit]
-func _play(lvl: int, count: int, seed_value: int, interval: float, margin: float) -> Array:
+func _play(lvl: int, count: int, seed_value: int, interval: float, margin: float,
+		type_id: String = "standard", upg: int = 0, enemy: bool = false) -> Array:
 	var g = Game.new()
 	root.add_child(g)
 	g.rng.seed = seed_value
 	g.difficulty = lvl
 	g.circle_count = count
+	g.selected_type = type_id
+	g.enemy_levels_up = enemy
+	for id in g.UPGRADE_IDS:
+		g.upgrade_levels[id] = upg
 	g.start_game()
 
 	var t := 0.0
@@ -91,7 +103,7 @@ func _bot_think(g, margin: float) -> int:
 			var dist: float = g.circles[src]["pos"].distance_to(g.circles[dst]["pos"])
 			var need: float = g.circles[dst]["value"]
 			if g.circles[dst]["owner"] == 2:
-				need += g.BASE_GROWTH * g.level["growth"] * dist / g.ARMY_SPEED
+				need += g.BASE_GROWTH * g._growth(2) * dist / (g.ARMY_SPEED * g._speed(1))
 			need = need * margin + 1.0
 			var remaining: float = g.circles[src]["value"]
 			var total := 0.0

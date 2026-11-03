@@ -45,3 +45,14 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 
 1. Godot 4.3 installieren, `project.godot` importieren, mit F5 starten.
 2. Die APK baut GitHub Actions bei jedem Push auf `main` (Reiter „Actions“, Artefakt `echtzeit-strategie-apk`).
+
+## Fortschritt (Werkstatt)
+
+- Hauptmenü: **Spielen** (Schwierigkeit, Kreise, Armeetyp, "Gegner levelt mit") und **Werkstatt**; Münzen oben.
+- Verstärkungen **Kraft / Tempo / Wachstum**: je 10 Stufen, +5 % pro Stufe, Preise 100, 150, 200, 300, 400, 550, 700, 900, 1100, 1400.
+- Armeetypen: Standard (Dreieck), **Tank** (Quadrat, Kraft ×1,3, Tempo ×0,7) und **Schnell** (Stern, Kraft ×0,8, Tempo ×1,4), je 500 Münzen.
+- Kraft wirkt nur im Kampf (Angriff und Verteidigung): beide Armeen × Kraft, die Differenz entscheidet.
+- "Gegner levelt mit": Gegner bekommt deine Verstärkungen, Münzen ×1,5.
+- Münzen pro Sieg: 20 / 40 / 70 / 110 / 160 (bei 12 Kreisen, skaliert mit der Kreisanzahl), Niederlage 25 %.
+- Speicherstand in `user://settings.cfg`. Developer Mode (Hauptmenü): +1000 Münzen, alles freischalten, Fortschritt zurücksetzen.
+- Tests: `godot --headless --path . -s tools/tests.gd`; Simulation mit `type=tank|star upg=0..10 enemy=1`.
