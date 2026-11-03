@@ -13,6 +13,8 @@ const START_VALUE := 15.0      # Startarmee beider Spieler
 const ARMY_SPEED := 160.0      # Pixel pro Sekunde für entsendete Armeen
 const BASE_GROWTH := 1.0       # Armee pro Sekunde auf einem besetzten Kreis
 const SEND_FRACTION := 0.5     # Anteil der vorhandenen Armee, der pro Wischen gesendet wird
+const HOLD_DELAY := 0.4        # so lange auf dem Ziel halten, bis die Prozentanzeige erscheint
+const HOLD_RAMP := 1.5         # danach steigt sie in dieser Zeit von 50 auf 100 %
 const TAP_TOLERANCE := 16.0    # Trefferfläche = sichtbarer Kreis + dieser Rand
 const MIN_HIT_RADIUS := 56.0   # auch kleine Kreise sind mindestens so gut treffbar
 const RELEASE_SNAP := 30.0     # beim Loslassen zählt ein Kreis auch knapp daneben
@@ -66,6 +68,8 @@ var press_index := -1
 var press_button := ""
 var drag_active := false
 var drag_pos := Vector2.ZERO
+var hold_target := -1          # Kreis, auf dem der Finger beim Zielen gerade liegt
+var hold_time := 0.0           # wie lange schon (Sekunden)
 var ai_timer := 0.0
 var level: Dictionary = LEVELS[2]
 var game_over := false
@@ -119,6 +123,8 @@ func start_game() -> void:
 	press_index = -1
 	press_button = ""
 	drag_active = false
+	hold_target = -1
+	hold_time = 0.0
 	game_over = false
 	winner = 0
 	dev_paused = false
@@ -355,6 +361,8 @@ func _on_press(pos: Vector2) -> void:
 		return
 	drag_active = true
 	drag_pos = pos
+	hold_target = -1
+	hold_time = 0.0
 	press_index = _circle_at(pos)
 	if press_index >= 0 and circles[press_index]["owner"] == 1:
 		selected = press_index
@@ -377,10 +385,16 @@ func _on_release(pos: Vector2) -> void:
 	var target := _circle_at(pos, RELEASE_SNAP)
 	if press_index >= 0 and circles[press_index]["owner"] == 1:
 		if target >= 0 and target != press_index:
-			_try_send(1, press_index, target, SEND_FRACTION)
+			# Auf dem Ziel gehalten? Dann zählt der angezeigte Prozentwert, sonst 50 %.
+			var percent := 50
+			if target == hold_target:
+				percent = _hold_percent()
+			_send_amount(1, press_index, target, _amount_for_percent(press_index, percent))
 	else:
 		selected = -1
 	press_index = -1
+	hold_target = -1
+	hold_time = 0.0
 	queue_redraw()
 
 
@@ -408,6 +422,40 @@ func _circle_at(pos: Vector2, extra: float = 0.0) -> int:
 func _amount_for(src: int, fraction: float) -> float:
 	var v: float = floorf(circles[src]["value"])
 	return clampf(floorf(circles[src]["value"] * fraction), 1.0, maxf(v, 1.0))
+
+
+# Prozentwert beim Halten auf dem Ziel: 50 % bis zur Anzeige, danach in 5-%-Schritten
+# bis 100 % (HOLD_RAMP Sekunden). Ohne Halten immer 50.
+func _hold_percent() -> int:
+	if hold_target < 0 or hold_time < HOLD_DELAY:
+		return 50
+	var t := clampf((hold_time - HOLD_DELAY) / HOLD_RAMP, 0.0, 1.0)
+	return 50 + roundi(t * 10.0) * 5
+
+
+# Läuft jeden Frame: misst, wie lange der Finger beim Zielen auf demselben Kreis liegt.
+func _update_hold(delta: float) -> void:
+	var hover := -1
+	if drag_active and selected >= 0:
+		hover = _circle_at(drag_pos, RELEASE_SNAP)
+		if hover == selected:
+			hover = -1
+	if hover < 0:
+		hold_target = -1
+		hold_time = 0.0
+	elif hover != hold_target:
+		hold_target = hover
+		hold_time = 0.0
+	else:
+		hold_time += delta
+
+
+# Menge für einen Prozentwert: 100 % sendet alles bis auf 1, sonst der gerundete Anteil
+func _amount_for_percent(src: int, percent: int) -> float:
+	if percent >= 100:
+		var v: float = floorf(circles[src]["value"])
+		return clampf(v - 1.0, 1.0, maxf(v, 1.0))
+	return _amount_for(src, percent / 100.0)
 
 
 # Sendet einen Anteil der Armee von src nach dst.
@@ -471,6 +519,8 @@ func _check_winner() -> void:
 # ---------- Ablauf ----------
 
 func _process(delta: float) -> void:
+	if state == State.PLAYING and not game_over:
+		_update_hold(delta)
 	if state == State.PLAYING and not game_over and not dev_paused:
 		_tick(delta * SPEEDS[dev_speed_index])
 	queue_redraw()
@@ -687,8 +737,22 @@ func _draw_game(font: Font) -> void:
 			var hc: Dictionary = circles[hover]
 			end = hc["pos"]
 			draw_arc(hc["pos"], hc["radius"] + 10.0, 0.0, TAU, 48, Color.WHITE, 3.0)
-			draw_string(font, hc["pos"] + Vector2(-60.0, -hc["radius"] - 18.0),
-				"-> %d" % int(_amount_for(selected, SEND_FRACTION)),
+			var pct := _hold_percent()
+			var label_y: float = -hc["radius"] - 18.0
+			if hold_target == hover and hold_time >= HOLD_DELAY:
+				# Halte-Anzeige: Bogen um das Ziel füllt sich von 50 auf 100 %
+				var arc_r: float = hc["radius"] + 24.0
+				var frac := float(pct - 50) / 50.0
+				draw_arc(hc["pos"], arc_r, 0.0, TAU, 64, Color(1, 1, 1, 0.2), 8.0)
+				if frac > 0.0:
+					draw_arc(hc["pos"], arc_r, -PI * 0.5, -PI * 0.5 + TAU * frac, 64, Color("#ffd23f"), 8.0)
+				draw_rect(Rect2(hc["pos"] + Vector2(-48.0, label_y - 68.0), Vector2(96.0, 74.0)),
+					Color(BG_COLOR, 0.88), true)
+				draw_string(font, hc["pos"] + Vector2(-60.0, label_y - 32.0), "%d %%" % pct,
+					HORIZONTAL_ALIGNMENT_CENTER, 120, 34, Color("#ffd23f"))
+				label_y -= 8.0
+			draw_string(font, hc["pos"] + Vector2(-60.0, label_y),
+				"-> %d" % int(_amount_for_percent(selected, pct)),
 				HORIZONTAL_ALIGNMENT_CENTER, 120, 24, Color.WHITE)
 		draw_line(circles[selected]["pos"], end, Color(1, 1, 1, 0.5), 3.0)
 
@@ -698,7 +762,7 @@ func _draw_game(font: Font) -> void:
 		"Du: %d   %s: %d" % [player_count, level["name"], enemy_count],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color.WHITE)
 	draw_string(font, Vector2(20, 76),
-		"Wischen sendet %d %% der Armee" % int(SEND_FRACTION * 100),
+		"Wischen = %d %%, Ziel halten = mehr" % int(SEND_FRACTION * 100),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 1, 0.8))
 
 	if dev_mode:

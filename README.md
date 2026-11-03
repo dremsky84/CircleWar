@@ -17,7 +17,8 @@ Echtzeit-Strategie mit Kreisen für das Handy (Godot 4.3). Zwei Kontrahenten kä
 
 ## Steuerung
 
-- **Wischen:** von einem eigenen Kreis auf ein Ziel ziehen. Jedes Wischen sendet immer **50 %** der vorhandenen Armee (abgerundet, mindestens 1). Wer mehr senden will, wischt mehrmals.
+- **Wischen:** von einem eigenen Kreis auf ein Ziel ziehen und loslassen sendet **50 %** der vorhandenen Armee (abgerundet, mindestens 1).
+- **Halten:** Bleibt der Finger beim Zielen länger auf dem Ziel, erscheint ein Bogen mit einer Anzeige, die von 50 % auf 100 % steigt (5-%-Schritte). Beim Loslassen wird dieser Anteil gesendet. Bei 100 % wird alles bis auf 1 gesendet. Wechselt der Finger auf einen anderen Kreis, beginnt die Anzeige neu.
 - **Menü-Knopf** oben rechts bricht die Partie ab; nach dem Ende gibt es „Nochmal“ und „Menü“
 
 ## Developer Mode
