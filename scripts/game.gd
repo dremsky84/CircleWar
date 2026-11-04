@@ -170,6 +170,7 @@ var shop_pause := false
 var shop_planet := -1
 var shop_votes := {1: false, 2: true}   # lokal: 1 = ich, 2 = Gegner (KI zählt immer als bereit)
 var press_pos := Vector2.ZERO
+var chain: Array = []          # eigene Planeten, über die gewischt wurde (Sammelangriff)
 var title_taps := 0            # Geheimcode: 5x auf den Titel tippen
 var title_tap_time := 0
 var toast := ""
@@ -830,6 +831,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			_on_release(event.position)
 	elif event is InputEventMouseMotion and drag_active:
+		_chain_track(drag_pos, event.position)
 		drag_pos = event.position
 		queue_redraw()
 
@@ -899,8 +901,10 @@ func _on_press(pos: Vector2) -> void:
 	hold_target = -1
 	hold_time = 0.0
 	press_index = _circle_at(pos)
+	chain.clear()
 	if press_index >= 0 and circles[press_index]["owner"] == 1:
 		selected = press_index
+		chain.append(press_index)
 	queue_redraw()
 
 
@@ -924,15 +928,38 @@ func _on_release(pos: Vector2) -> void:
 			var percent := 50
 			if target == hold_target:
 				percent = _hold_percent()
-			_player_send(press_index, target, percent)
-		elif target == press_index and not shop_pause:
+			# Alle Planeten der Kette schicken ihren Anteil gemeinsam zum Ziel
+			for src in _chain_sources(target):
+				_player_send(src, target, percent)
+		elif target == press_index and chain.size() <= 1 and not shop_pause:
 			_shop_open(press_index)  # Antippen eines eigenen Planeten: Upgrades
 	else:
 		selected = -1
 	press_index = -1
+	chain.clear()
 	hold_target = -1
 	hold_time = 0.0
 	queue_redraw()
+
+
+# Sammelangriff: Wer beim Wischen über weitere eigene Planeten fährt, nimmt sie in die Kette auf.
+# Die Strecke wird in kleinen Schritten geprüft, damit auch schnelle Wischer nichts auslassen.
+func _chain_track(from: Vector2, to: Vector2) -> void:
+	if chain.is_empty():
+		return
+	var steps := maxi(1, int(from.distance_to(to) / 12.0))
+	for i in range(1, steps + 1):
+		var idx := _circle_at(from.lerp(to, float(i) / float(steps)))
+		if idx >= 0 and circles[idx]["owner"] == 1 and not (idx in chain):
+			chain.append(idx)
+			Input.vibrate_handheld(15)
+
+
+# Quellen eines Wischers: alle Planeten der Kette, außer dem Ziel (wenn es selbst in der Kette liegt)
+func _chain_sources(target: int) -> Array:
+	var out := chain.duplicate()
+	out.erase(target)
+	return out
 
 
 # Trefferradius eines Kreises: sichtbarer Kreis plus Rand, mindestens MIN_HIT_RADIUS
@@ -2041,6 +2068,10 @@ func _draw_game(font: Font) -> void:
 	if drag_active and selected >= 0:
 		var end := drag_pos
 		var hover := _circle_at(drag_pos, RELEASE_SNAP)
+		# Kette: Planeten, über die gewischt wurde, werden hervorgehoben und verbunden
+		for ci in chain:
+			if ci != selected:
+				draw_arc(circles[ci]["pos"], circles[ci]["radius"] + 10.0, 0.0, TAU, 48, GOLD, 3.0)
 		if hover >= 0 and hover != selected:
 			var hc: Dictionary = circles[hover]
 			end = hc["pos"]
@@ -2059,10 +2090,20 @@ func _draw_game(font: Font) -> void:
 				draw_string(font, hc["pos"] + Vector2(-60.0, label_y - 32.0), "%d %%" % pct,
 					HORIZONTAL_ALIGNMENT_CENTER, 120, 34, GOLD)
 				label_y -= 8.0
+			var total := 0.0
+			for src in _chain_sources(hover):
+				total += _amount_for_percent(src, pct)
 			draw_string(font, hc["pos"] + Vector2(-60.0, label_y),
-				"-> %d" % int(_amount_for_percent(selected, pct)),
+				"-> %d" % int(total),
 				HORIZONTAL_ALIGNMENT_CENTER, 120, 24, Color.WHITE)
-		draw_line(circles[selected]["pos"], end, Color(1, 1, 1, 0.5), 3.0)
+		# Linie durch alle Planeten der Kette bis zum Finger bzw. Ziel
+		var pts := PackedVector2Array()
+		for ci in chain:
+			if ci != hover or ci == selected:
+				pts.append(circles[ci]["pos"])
+		pts.append(end)
+		if pts.size() >= 2:
+			draw_polyline(pts, Color(1, 1, 1, 0.5), 3.0)
 
 	var player_count := _indices_with_owner(1).size()
 	var enemy_count := _indices_with_owner(2).size()
@@ -2070,8 +2111,8 @@ func _draw_game(font: Font) -> void:
 		"Du: %d   %s: %d" % [player_count, "Gegner" if mp_role != "" else level["name"], enemy_count],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color.WHITE)
 	draw_string(font, Vector2(20, 76),
-		"Wischen = %d %%, Ziel halten = mehr" % int(SEND_FRACTION * 100),
-		HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 1, 0.8))
+		"Wischen = %d %%, Ziel halten = mehr, über eigene = sammeln" % int(SEND_FRACTION * 100),
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(1, 1, 1, 0.8))
 
 	if shop_pause and not game_over:
 		_draw_shop(font)

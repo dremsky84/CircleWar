@@ -169,6 +169,58 @@ func _initialize() -> void:
 	check(u.circles[1]["shield"] + u.circles[1]["gun"] + u.circles[1]["boost"] > 0, "KI kauft")
 	check(u.circles[1]["value"] >= Game.AI_KEEP - 0.01, "KI behält Reserve")
 	u.free()
+	# Sammelangriff: über eigene Planeten wischen, Armeen reisen gemeinsam zum letzten Ziel
+	var q = Game.new()
+	root.add_child(q)
+	q.map_size = Vector2(720, 1280)
+	q.circles.clear()
+	var spots := [Vector2(100, 1000), Vector2(300, 1000), Vector2(500, 1000), Vector2(300, 300)]
+	var owners := [1, 1, 1, 2]
+	for k in 4:
+		q.circles.append(q._make_circle(spots[k], 20.0, owners[k]))
+	q.state = Game.State.PLAYING
+	q.level = Game.LEVELS[0]
+	q._compute_stats()
+	q.ai_timer = 1e9
+	q._on_press(spots[0])
+	q._chain_track(spots[0], spots[1])
+	q._chain_track(spots[1], spots[2])
+	check(q.chain == [0, 1, 2], "Kette A-B-C")
+	q._chain_track(spots[2], spots[0])
+	check(q.chain.size() == 3, "keine Doppelten")
+	q._chain_track(spots[2], spots[3])
+	q._on_release(spots[3])
+	check(q.armies.size() == 3, "3 Armeen zum Gegner")
+	var okay := true
+	for a in q.armies:
+		if a["target"] != 3 or absf(a["amount"] - 10.0) > 0.01:
+			okay = false
+	check(okay, "je 50 %% zum letzten Ziel")
+	check(q.chain.is_empty(), "Kette geleert")
+	# Ende auf eigenem Planeten: A und B sammeln auf C
+	q.armies.clear()
+	for k in 3:
+		q.circles[k]["value"] = 20.0
+	q._on_press(spots[0])
+	q._chain_track(spots[0], spots[1])
+	q._chain_track(spots[1], spots[2])
+	q._on_release(spots[2])
+	check(q.armies.size() == 2, "A und B sammeln auf C")
+	var to_c := true
+	for a in q.armies:
+		if a["target"] != 2:
+			to_c = false
+	check(to_c, "Ziel ist C")
+	# einfaches Wischen und Antippen wie bisher
+	q.armies.clear()
+	q._on_press(spots[0])
+	q._chain_track(spots[0], spots[3])
+	q._on_release(spots[3])
+	check(q.armies.size() == 1, "einfaches Wischen")
+	q._on_press(spots[1])
+	q._on_release(spots[1])
+	check(q.shop_pause and q.shop_planet == 1, "Antippen öffnet Upgrades")
+	q.free()
 	h.free()
 	print("Tests fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)

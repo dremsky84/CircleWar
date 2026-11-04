@@ -86,3 +86,9 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - Simulation: `botbuy=<0..1>` lässt den Bot ebenfalls kaufen.
 
 - Ohne WLAN: Ein Handy schaltet seinen **mobilen Hotspot** ein, das andere verbindet sich damit; danach läuft der Mehrspieler unverändert (Hinweis steht auch in den Menüs).
+
+## Sammelangriff
+
+- Beim Wischen über weitere **eigene** Planeten fahren: Sie werden golden markiert und mit einer Linie verbunden.
+- Am Ende schicken alle Planeten der Kette ihren Anteil (50 %, per Halten bis 100 %) gemeinsam zum letzten Ziel. Endet der Wischer auf einem eigenen Planeten, sammeln sich die Armeen der vorherigen Planeten dort.
+- Die Anzeige am Ziel zeigt die Summe aller Armeen ("-> N"). Gilt auch im Mehrspieler.
