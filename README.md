@@ -62,3 +62,10 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - **Pause** (oben rechts): friert die Partie ein. Im Pause-Menü: Fortfahren, Menü und (Developer Mode) das Developer-Panel.
 - **Menü** aus dem Pause-Menü lässt die Partie bestehen; im Hauptmenü gibt es dann **Fortfahren**.
 - Kämpfe zeigen Blitze, Funken und eine Druckwelle um den Kreis (größer bei Eroberung).
+
+## Mehrspieler (WLAN)
+
+- Hauptmenü → **Mehrspieler (WLAN)**. Einer erstellt ein Spiel, der andere findet es automatisch (UDP-Broadcast, Port 24601) oder gibt die IP ein (Spielport 24600).
+- Der Host rechnet das Spiel, der Client bekommt den Zustand ca. 15× pro Sekunde und schickt seine Wisch-Befehle; die Karte ist für den Client gespiegelt, sodass er immer unten spielt.
+- Beide spielen mit Standard-Armeen (keine Verstärkungen, keine Münzen). Der Host startet Revanche mit "Nochmal".
+- Test auf einem Rechner: `tools/net_test.gd` (Host und Client als zwei Prozesse).

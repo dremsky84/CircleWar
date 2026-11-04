@@ -4,7 +4,7 @@ extends Node2D
 # Hauptmenü -> Spielen (Einstellungen) oder Werkstatt (Verstärkungen, Armeetypen)
 # -> Partie gegen die KI -> Ergebnis mit Münzen
 
-enum State { MAIN, SETUP, WORKSHOP, PLAYING }
+enum State { MAIN, SETUP, WORKSHOP, PLAYING, MULTI }
 
 const DESIGN_SIZE := Vector2(720, 1280)
 const EDGE_MARGIN := 80.0      # Abstand der Kreise zum seitlichen/unteren Rand
@@ -21,6 +21,9 @@ const MIN_HIT_RADIUS := 56.0   # auch kleine Kreise sind mindestens so gut treff
 const RELEASE_SNAP := 30.0     # beim Loslassen zählt ein Kreis auch knapp daneben
 const MIN_CIRCLES := 4
 const MAX_CIRCLES := 30
+const NET_PORT := 24600          # Mehrspieler (ENet) im WLAN
+const DISCOVERY_PORT := 24601    # Broadcast, damit Spiele im WLAN gefunden werden
+const SNAPSHOT_RATE := 15.0      # Zustandsübertragungen pro Sekunde
 const SETTINGS_PATH := "user://settings.cfg"
 const SPEEDS := [0.5, 1.0, 2.0, 4.0]
 const SPEED_LABELS := ["0.5", "1", "2", "4"]
@@ -123,6 +126,18 @@ var dev_speed_index := 1
 var dev_ai_frozen := false
 var dev_info := false
 var dev_tool := ""             # "", "owner", "plus", "minus"
+# Mehrspieler: Host rechnet das Spiel, der Client zeigt es gespiegelt an und schickt Befehle
+var mp_role := ""              # "", "host", "client"
+var mp_status := ""            # "", "hosting", "connecting", "waiting", "playing"
+var mp_peer: ENetMultiplayerPeer = null
+var mp_udp_send: PacketPeerUDP = null
+var mp_udp_recv: PacketPeerUDP = null
+var mp_found: Dictionary = {}  # IP -> zuletzt gesehen (ms)
+var mp_bcast_timer := 0.0
+var mp_snap_timer := 0.0
+var mp_end_sent := false
+var last_ip := ""
+var ip_edit: LineEdit = null
 var title_taps := 0            # Geheimcode: 5x auf den Titel tippen
 var title_tap_time := 0
 var toast := ""
@@ -131,7 +146,18 @@ var toast_time := 0.0
 
 func _ready() -> void:
 	rng.randomize()
+	ip_edit = LineEdit.new()
+	ip_edit.placeholder_text = "IP-Adresse, z. B. 192.168.1.20"
+	ip_edit.add_theme_font_size_override("font_size", 28)
+	ip_edit.visible = false
+	add_child(ip_edit)
 	_load_settings()
+	ip_edit.text = last_ip
+	multiplayer.peer_connected.connect(_on_peer_connected)
+	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
+	multiplayer.connected_to_server.connect(_on_connected)
+	multiplayer.connection_failed.connect(_on_connection_failed)
+	multiplayer.server_disconnected.connect(_on_server_disconnected)
 	_update_size()
 	get_viewport().size_changed.connect(_update_size)
 
@@ -157,6 +183,7 @@ func _load_settings() -> void:
 	circle_count = clampi(int(cfg.get_value("game", "circles", circle_count)), MIN_CIRCLES, MAX_CIRCLES)
 	dev_mode = bool(cfg.get_value("game", "dev", false))
 	enemy_levels_up = bool(cfg.get_value("game", "enemy_levels", false))
+	last_ip = str(cfg.get_value("net", "ip", ""))
 	coins = maxi(0, int(cfg.get_value("progress", "coins", 0)))
 	for id in UPGRADE_IDS:
 		upgrade_levels[id] = clampi(int(cfg.get_value("progress", "lvl_" + id, 0)), 0, MAX_LEVEL)
@@ -176,6 +203,7 @@ func _save_settings() -> void:
 	cfg.set_value("game", "dev", dev_mode)
 	cfg.set_value("game", "enemy_levels", enemy_levels_up)
 	cfg.set_value("game", "type", selected_type)
+	cfg.set_value("net", "ip", last_ip)
 	cfg.set_value("progress", "coins", coins)
 	for id in UPGRADE_IDS:
 		cfg.set_value("progress", "lvl_" + id, upgrade_levels[id])
@@ -201,6 +229,11 @@ func _compute_stats() -> void:
 		e_speed = _upgrade_mult("speed")
 		e_growth = _upgrade_mult("growth")
 	var ai_growth: float = level["growth"]
+	if mp_role != "":
+		# Mehrspieler: beide Seiten mit Standardwerten, ohne Verstärkungen
+		var base := {"power": 1.0, "speed": 1.0, "growth": 1.0, "shape": "triangle"}
+		stats = {1: base.duplicate(), 2: base.duplicate()}
+		return
 	stats = {
 		1: {"power": float(t["power"]) * _upgrade_mult("power"),
 			"speed": float(t["speed"]) * _upgrade_mult("speed"),
@@ -428,9 +461,11 @@ func _buttons() -> Array:
 					["laufende Partie"]))
 				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 530.0, bw, 100.0), "Neues Spiel", 34))
 				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 650.0, bw, 100.0), "Werkstatt", 34))
+				list.append(_btn("go_multi", Rect2(cx - bw * 0.5, off + 770.0, bw, 100.0), "Mehrspieler (WLAN)", 30))
 			else:
 				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 400.0, bw, 130.0), "Spielen", 44))
 				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 560.0, bw, 110.0), "Werkstatt", 38))
+				list.append(_btn("go_multi", Rect2(cx - bw * 0.5, off + 690.0, bw, 100.0), "Mehrspieler (WLAN)", 30))
 			if dev_mode:
 				var w := (bw - 20.0) / 3.0
 				list.append(_btn("dev_coins", Rect2(cx - bw * 0.5, off + 1070.0, w, 70.0), "+1000", 22, ["Münzen"]))
@@ -468,10 +503,23 @@ func _buttons() -> Array:
 				var r: Rect2 = row["rect"]
 				list.append(_btn(row["id"], Rect2(r.position.x + r.size.x - 210.0, r.position.y + 20.0, 190.0, 70.0),
 					row["btn"], 22, [], row["enabled"]))
+		State.MULTI:
+			list.append(_btn("mp_cancel", Rect2(20.0, off + 16.0, 150.0, 56.0), "Zurück", 26))
+			if mp_status == "":
+				list.append(_btn("mp_host", Rect2(cx - bw * 0.5, off + 190.0, bw, 100.0), "Spiel erstellen", 34))
+				var ips: Array = mp_found.keys()
+				for i in mini(ips.size(), 4):
+					list.append(_btn("join_" + str(ips[i]), Rect2(cx - bw * 0.5, off + 370.0 + i * 80.0, bw, 70.0),
+						"Beitreten: " + str(ips[i]), 26))
+				list.append(_btn("mp_connect", Rect2(cx - bw * 0.5, off + 825.0, bw, 90.0), "Verbinden", 30))
+			elif mp_status == "hosting":
+				list.append(_btn("minus", Rect2(cx - bw * 0.5, off + 520.0, 110.0, 70.0), "-"))
+				list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, off + 520.0, 110.0, 70.0), "+"))
 		State.PLAYING:
 			if game_over:
 				var gw := 400.0
-				list.append(_btn("again", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 110.0, gw, 90.0), "Nochmal"))
+				if mp_role != "client":
+					list.append(_btn("again", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 110.0, gw, 90.0), "Nochmal"))
 				list.append(_btn("tomenu", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 220.0, gw, 90.0), "Menü"))
 			else:
 				if paused:
@@ -484,7 +532,7 @@ func _buttons() -> Array:
 						if dev_open:
 							list.append_array(_dev_buttons())
 				else:
-					list.append(_btn("pause", Rect2(map_size.x - 170.0, 16.0, 150.0, 56.0), "Pause", 26))
+					list.append(_btn("pause", Rect2(map_size.x - 170.0, 16.0, 150.0, 56.0), "Verlassen" if mp_role != "" else "Pause", 26))
 	return list
 
 
@@ -520,6 +568,17 @@ func _activate(id: String) -> void:
 			state = State.SETUP
 		"go_workshop":
 			state = State.WORKSHOP
+		"go_multi":
+			state = State.MULTI
+			_mp_close()
+			_mp_listen()
+		"mp_host":
+			_mp_host()
+		"mp_connect":
+			_mp_join(ip_edit.text.strip_edges())
+		"mp_cancel":
+			_mp_close()
+			state = State.MAIN
 		"back":
 			state = State.MAIN
 		"start":
@@ -533,8 +592,18 @@ func _activate(id: String) -> void:
 			enemy_levels_up = not enemy_levels_up
 			_save_settings()
 		"again":
-			start_game()
+			if mp_role == "host":
+				if multiplayer.get_peers().is_empty():
+					mp_status = "hosting"
+					state = State.MULTI
+				else:
+					_mp_start_round()
+			else:
+				start_game()
 		"pause":
+			if mp_role != "":
+				_mp_leave()
+				return
 			paused = true
 			drag_active = false
 			selected = -1
@@ -545,6 +614,9 @@ func _activate(id: String) -> void:
 			paused = false
 			dev_open = false
 		"menu", "tomenu":
+			if mp_role != "":
+				_mp_leave()
+				return
 			# Eine laufende Partie bleibt erhalten ("Fortfahren" im Hauptmenü)
 			state = State.MAIN
 			paused = true
@@ -598,7 +670,9 @@ func _activate(id: String) -> void:
 		"dev_tool_off":
 			dev_tool = ""
 		_:
-			if id.begins_with("buy_"):
+			if id.begins_with("join_"):
+				_mp_join(id.substr(5))
+			elif id.begins_with("buy_"):
 				_buy_upgrade(id.substr(4))
 			elif id.begins_with("unlock_"):
 				_unlock_type(id.substr(7))
@@ -685,6 +759,10 @@ func _on_press(pos: Vector2) -> void:
 		title_taps = 0
 		queue_redraw()
 		return
+	if state == State.MULTI:
+		if ip_edit != null:
+			ip_edit.release_focus()
+		return
 	if state == State.MAIN:
 		if _title_rect().has_point(pos):
 			_title_tap()
@@ -696,7 +774,7 @@ func _on_press(pos: Vector2) -> void:
 		return
 	if paused and dev_mode and dev_open and _panel_rect().has_point(pos):
 		return  # Berührungen auf dem Panel gehen nicht ins Spielfeld durch
-	if dev_mode and dev_tool != "":
+	if dev_mode and dev_tool != "" and mp_role == "":
 		_apply_dev_tool(_circle_at(pos))
 		return
 	if paused:
@@ -731,7 +809,7 @@ func _on_release(pos: Vector2) -> void:
 			var percent := 50
 			if target == hold_target:
 				percent = _hold_percent()
-			_send_amount(1, press_index, target, _amount_for_percent(press_index, percent))
+			_player_send(press_index, target, percent)
 	else:
 		selected = -1
 	press_index = -1
@@ -823,6 +901,7 @@ func _send_amount(owner: int, src: int, dst: int, amount: float) -> bool:
 		"owner": owner,
 		"amount": amount,
 		"target": dst,
+		"src": src,
 		"progress": 0.0,
 	})
 	return true
@@ -841,6 +920,8 @@ func _resolve(army: Dictionary) -> void:
 	_spawn_fx(dst, owner, atk > dfn)
 	if atk > dfn and (owner == 1 or dst["owner"] == 1):
 		Input.vibrate_handheld(60)  # Kreis erobert (oder verloren)
+	if mp_role == "host" and mp_peer != null and mp_status == "playing":
+		rpc_fx.rpc(int(army["target"]), owner, atk > dfn)
 	if atk > dfn:
 		dst["owner"] = owner
 		dst["value"] = (atk - dfn) / _power(owner)
@@ -920,7 +1001,8 @@ func _process(delta: float) -> void:
 		toast_time -= delta
 	if state == State.PLAYING and game_over and not reward_paid:
 		_pay_reward()
-	var running := state == State.PLAYING and not game_over and not paused
+	_mp_process(delta)
+	var running := state == State.PLAYING and not game_over and not paused and mp_role != "client"
 	if running:
 		_update_hold(delta)
 		_tick(delta * SPEEDS[dev_speed_index])
@@ -943,13 +1025,323 @@ func _tick(delta: float) -> void:
 			armies.erase(army)
 			_resolve(army)
 
-	if not dev_ai_frozen:
+	if mp_role == "" and not dev_ai_frozen:
 		ai_timer -= delta
 		if ai_timer <= 0.0:
 			ai_timer = level["interval"]
 			_ai_think()
 
 	_check_winner()
+
+
+# ---------- Mehrspieler (WLAN) ----------
+
+func _swap(o: int) -> int:
+	return 3 - o if o > 0 else 0
+
+
+func _local_ips() -> Array:
+	var out := []
+	for a in IP.get_local_addresses():
+		if a.contains(":") or a.begins_with("127.") or a.begins_with("169.254."):
+			continue
+		out.append(a)
+	return out
+
+
+func _mp_listen() -> void:
+	if mp_udp_recv != null:
+		return
+	mp_found.clear()
+	mp_udp_recv = PacketPeerUDP.new()
+	if mp_udp_recv.bind(DISCOVERY_PORT) != OK:
+		mp_udp_recv = null
+
+
+# Alles beenden: Verbindung, Broadcast, Suche
+func _mp_close() -> void:
+	if mp_peer != null:
+		mp_peer.close()
+	mp_peer = null
+	if multiplayer.multiplayer_peer != null:
+		multiplayer.multiplayer_peer = null
+	if mp_udp_send != null:
+		mp_udp_send.close()
+		mp_udp_send = null
+	if mp_udp_recv != null:
+		mp_udp_recv.close()
+		mp_udp_recv = null
+	mp_role = ""
+	mp_status = ""
+	mp_end_sent = false
+
+
+# Spiel (laufend oder beendet) verlassen und zurück ins Hauptmenü
+func _mp_leave() -> void:
+	_mp_close()
+	circles.clear()
+	armies.clear()
+	game_over = false
+	drag_active = false
+	selected = -1
+	state = State.MAIN
+	_update_size()
+
+
+func _mp_host() -> void:
+	_mp_close()
+	var peer := ENetMultiplayerPeer.new()
+	if peer.create_server(NET_PORT, 1) != OK:
+		toast = "Spiel konnte nicht erstellt werden"
+		toast_time = 3.0
+		return
+	mp_peer = peer
+	multiplayer.multiplayer_peer = peer
+	mp_role = "host"
+	mp_status = "hosting"
+	mp_udp_send = PacketPeerUDP.new()
+	mp_udp_send.set_broadcast_enabled(true)
+	mp_udp_send.set_dest_address("255.255.255.255", DISCOVERY_PORT)
+	mp_bcast_timer = 0.0
+
+
+func _mp_join(ip: String) -> void:
+	if ip == "":
+		toast = "Bitte IP-Adresse eingeben"
+		toast_time = 3.0
+		return
+	_mp_close()
+	var peer := ENetMultiplayerPeer.new()
+	if peer.create_client(ip, NET_PORT) != OK:
+		toast = "Verbindung nicht möglich"
+		toast_time = 3.0
+		return
+	last_ip = ip
+	_save_settings()
+	mp_peer = peer
+	multiplayer.multiplayer_peer = peer
+	mp_role = "client"
+	mp_status = "connecting"
+
+
+func _on_peer_connected(_id: int) -> void:
+	if mp_role == "host" and mp_status == "hosting":
+		_mp_start_round()
+
+
+func _on_peer_disconnected(_id: int) -> void:
+	if mp_role != "host":
+		return
+	if state == State.PLAYING and not game_over:
+		game_over = true
+		winner = 1
+		mp_end_sent = true
+		drag_active = false
+		selected = -1
+		toast = "Gegner hat das Spiel verlassen"
+		toast_time = 6.0
+	elif state != State.PLAYING:
+		mp_status = "hosting"
+
+
+func _on_connected() -> void:
+	mp_status = "waiting"
+
+
+func _on_connection_failed() -> void:
+	_mp_close()
+	toast = "Keine Verbindung zum Host"
+	toast_time = 4.0
+
+
+func _on_server_disconnected() -> void:
+	_mp_leave()
+	toast = "Verbindung zum Host verloren"
+	toast_time = 4.0
+
+
+# Host: neue Runde starten und dem Client die Karte schicken
+func _mp_start_round() -> void:
+	dev_speed_index = 1
+	dev_ai_frozen = false
+	dev_tool = ""
+	dev_open = false
+	start_game()
+	reward_paid = true
+	mp_status = "playing"
+	mp_end_sent = false
+	mp_snap_timer = 0.0
+	rpc_begin.rpc(_pack_circles())
+
+
+func _pack_circles() -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	for c in circles:
+		var o: int = c["owner"]
+		out.append_array(PackedFloat32Array([
+			c["pos"].x / map_size.x, c["pos"].y / map_size.y, c["value"], float(o),
+			BASE_GROWTH * _growth(o) if o != 0 else 0.0, c["radius"]]))
+	return out
+
+
+func _pack_armies() -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	for a in armies:
+		var dist: float = maxf(a["from"].distance_to(a["to"]), 1.0)
+		out.append_array(PackedFloat32Array([
+			float(a["src"]), float(a["target"]), float(a["owner"]), a["amount"], a["progress"],
+			ARMY_SPEED * _speed(a["owner"]) / dist]))
+	return out
+
+
+# Client: Kreise aus den Host-Daten übernehmen (gespiegelt, Seiten getauscht)
+func _apply_circles(c: PackedFloat32Array, full: bool) -> void:
+	var n := c.size() / 6
+	if full:
+		circles.clear()
+		for i in n:
+			circles.append({"pos": Vector2.ZERO, "value": 0.0, "owner": 0, "radius": 0.0, "rate": 0.0})
+	if circles.size() != n:
+		return
+	for i in n:
+		var d: Dictionary = circles[i]
+		d["pos"] = Vector2(c[i * 6] * map_size.x, (1.0 - c[i * 6 + 1]) * map_size.y)
+		d["value"] = c[i * 6 + 2]
+		d["owner"] = _swap(int(c[i * 6 + 3]))
+		d["rate"] = c[i * 6 + 4]
+		d["radius"] = c[i * 6 + 5]
+
+
+func _apply_armies(a: PackedFloat32Array) -> void:
+	armies.clear()
+	for i in a.size() / 6:
+		var src := int(a[i * 6])
+		var dst := int(a[i * 6 + 1])
+		if src >= circles.size() or dst >= circles.size():
+			continue
+		armies.append({"from": circles[src]["pos"], "to": circles[dst]["pos"],
+			"owner": _swap(int(a[i * 6 + 2])), "amount": a[i * 6 + 3], "target": dst, "src": src,
+			"progress": a[i * 6 + 4], "rate": a[i * 6 + 5]})
+
+
+# Client: zwischen zwei Zustandsmeldungen weiterrechnen, damit alles flüssig läuft
+func _client_tick(delta: float) -> void:
+	for c in circles:
+		if c["owner"] != 0:
+			c["value"] += float(c.get("rate", 0.0)) * delta
+	for a in armies:
+		a["progress"] = minf(a["progress"] + float(a.get("rate", 0.0)) * delta, 1.0)
+
+
+func _player_send(src: int, dst: int, percent: int) -> void:
+	if mp_role == "client":
+		rpc_command.rpc_id(1, src, dst, percent)
+	else:
+		_send_amount(1, src, dst, _amount_for_percent(src, percent))
+
+
+@rpc("authority", "reliable")
+func rpc_begin(c: PackedFloat32Array) -> void:
+	if mp_role != "client":
+		return
+	map_size = get_viewport_rect().size if is_inside_tree() else DESIGN_SIZE
+	_apply_circles(c, true)
+	armies.clear()
+	fx.clear()
+	selected = -1
+	press_index = -1
+	drag_active = false
+	hold_target = -1
+	hold_time = 0.0
+	game_over = false
+	winner = 0
+	reward = 0
+	reward_paid = true
+	paused = false
+	level = LEVELS[difficulty]
+	_compute_stats()
+	mp_status = "playing"
+	state = State.PLAYING
+	queue_redraw()
+
+
+@rpc("authority", "unreliable_ordered")
+func rpc_snapshot(c: PackedFloat32Array, a: PackedFloat32Array) -> void:
+	if mp_role != "client" or state != State.PLAYING or game_over:
+		return
+	_apply_circles(c, false)
+	_apply_armies(a)
+
+
+@rpc("authority", "reliable")
+func rpc_end(host_winner: int) -> void:
+	if mp_role != "client":
+		return
+	game_over = true
+	winner = _swap(host_winner)
+	drag_active = false
+	selected = -1
+
+
+@rpc("authority", "unreliable")
+func rpc_fx(idx: int, attacker: int, conquered: bool) -> void:
+	if mp_role != "client" or idx < 0 or idx >= circles.size():
+		return
+	var local_attacker := _swap(attacker)
+	_spawn_fx(circles[idx], local_attacker, conquered)
+	if conquered and (local_attacker == 1 or circles[idx]["owner"] == 1):
+		Input.vibrate_handheld(60)
+
+
+@rpc("any_peer", "reliable")
+func rpc_command(src: int, dst: int, percent: int) -> void:
+	if mp_role != "host" or game_over or mp_status != "playing":
+		return
+	if src < 0 or src >= circles.size() or dst < 0 or dst >= circles.size():
+		return
+	_send_amount(2, src, dst, _amount_for_percent(src, clampi(percent, 50, 100)))
+
+
+func _mp_process(delta: float) -> void:
+	var now := Time.get_ticks_msec()
+	# Host: im Lobby-Zustand alle Sekunde "hier bin ich" senden
+	if mp_role == "host" and mp_status == "hosting" and mp_udp_send != null:
+		mp_bcast_timer -= delta
+		if mp_bcast_timer <= 0.0:
+			mp_bcast_timer = 1.0
+			mp_udp_send.put_packet("CircleWar1".to_utf8_buffer())
+	# Suchender: Hosts im WLAN einsammeln
+	if mp_udp_recv != null:
+		while mp_udp_recv.get_available_packet_count() > 0:
+			var text := mp_udp_recv.get_packet().get_string_from_utf8()
+			var ip := mp_udp_recv.get_packet_ip()
+			if text == "CircleWar1" and ip != "":
+				mp_found[ip] = now
+		for ip in mp_found.keys():
+			if now - int(mp_found[ip]) > 4000:
+				mp_found.erase(ip)
+	# Eingabefeld für die IP nur in der Suche zeigen
+	if ip_edit != null:
+		var show_edit := state == State.MULTI and mp_status == ""
+		ip_edit.visible = show_edit
+		if show_edit:
+			var off := _menu_offset()
+			var bw := minf(map_size.x - 80.0, 600.0)
+			ip_edit.position = Vector2(map_size.x * 0.5 - bw * 0.5, off + 740.0)
+			ip_edit.size = Vector2(bw, 70.0)
+	# Host: Zustand an den Client schicken, Spielende melden
+	if mp_role == "host" and mp_status == "playing" and state == State.PLAYING:
+		mp_snap_timer -= delta
+		if (mp_snap_timer <= 0.0 or game_over) and not mp_end_sent:
+			mp_snap_timer = 1.0 / SNAPSHOT_RATE
+			rpc_snapshot.rpc(_pack_circles(), _pack_armies())
+		if game_over and not mp_end_sent:
+			mp_end_sent = true
+			rpc_end.rpc(winner)
+	# Client: weiterrechnen
+	if mp_role == "client" and mp_status == "playing" and state == State.PLAYING and not game_over:
+		_update_hold(delta)
+		_client_tick(delta)
 
 
 # ---------- Gegner-KI ----------
@@ -1095,6 +1487,8 @@ func _draw() -> void:
 			_draw_workshop(font)
 		State.PLAYING:
 			_draw_game(font)
+		State.MULTI:
+			_draw_multi(font)
 
 
 func _draw_buttons(font: Font) -> void:
@@ -1131,6 +1525,35 @@ func _draw_setup(font: Font) -> void:
 	_text(font, off + 700.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
 	_text(font, off + 712.0 + 48.0, str(circle_count), 40, Color.WHITE)
 	_text(font, off + 832.0, "Armeetyp", 22, Color(1, 1, 1, 0.7))
+
+
+func _draw_multi(font: Font) -> void:
+	var off := _menu_offset()
+	_text(font, off + 130.0, "Mehrspieler (WLAN)", 44, Color.WHITE)
+	if toast_time > 0.0:
+		_text(font, off + 170.0, toast, 24, GOLD)
+	match mp_status:
+		"":
+			_text(font, off + 342.0, "Gefundene Spiele" if not mp_found.is_empty() else "Suche Spiele im WLAN …",
+				22, Color(1, 1, 1, 0.7))
+			_text(font, off + 720.0, "Oder IP-Adresse des Hosts eingeben", 22, Color(1, 1, 1, 0.7))
+			_text(font, off + 950.0, "Beide Handys müssen im selben WLAN sein.", 20, Color(1, 1, 1, 0.55))
+		"hosting":
+			_text(font, off + 280.0, "Warte auf Mitspieler …", 36, Color.WHITE)
+			var ips := _local_ips()
+			_text(font, off + 340.0, "Deine IP: " + (", ".join(ips) if not ips.is_empty() else "unbekannt"),
+				24, GOLD)
+			_text(font, off + 380.0, "Der Mitspieler findet dich automatisch oder gibt die IP ein.",
+				20, Color(1, 1, 1, 0.65))
+			_text(font, off + 500.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
+			_text(font, off + 520.0 + 48.0, str(circle_count), 40, Color.WHITE)
+			_text(font, off + 680.0, "Beide spielen mit Standard-Armeen, ohne Verstärkungen.",
+				20, Color(1, 1, 1, 0.6))
+		"connecting":
+			_text(font, off + 400.0, "Verbinde …", 36, Color.WHITE)
+		_:
+			_text(font, off + 400.0, "Verbunden – warte auf den Start", 30, Color.WHITE)
+	_draw_buttons(font)
 
 
 func _draw_workshop(font: Font) -> void:
@@ -1238,7 +1661,7 @@ func _draw_game(font: Font) -> void:
 	var player_count := _indices_with_owner(1).size()
 	var enemy_count := _indices_with_owner(2).size()
 	draw_string(font, Vector2(20, 40),
-		"Du: %d   %s: %d" % [player_count, level["name"], enemy_count],
+		"Du: %d   %s: %d" % [player_count, "Gegner" if mp_role != "" else level["name"], enemy_count],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color.WHITE)
 	draw_string(font, Vector2(20, 76),
 		"Wischen = %d %%, Ziel halten = mehr" % int(SEND_FRACTION * 100),
@@ -1261,7 +1684,14 @@ func _draw_game(font: Font) -> void:
 		draw_rect(Rect2(Vector2.ZERO, map_size), Color(0, 0, 0, 0.6), true)
 		var text := "Gewonnen!" if winner == 1 else "Verloren"
 		_text(font, map_size.y * 0.5 - 20.0, text, 64, Color.WHITE)
-		_text(font, map_size.y * 0.5 + 30.0, "%s (%s)" % [level["label"], level["name"]], 26, Color(1, 1, 1, 0.8))
+		if mp_role != "":
+			_text(font, map_size.y * 0.5 + 30.0, "Mehrspieler", 26, Color(1, 1, 1, 0.8))
+			if mp_role == "client":
+				_text(font, map_size.y * 0.5 + 78.0, "Der Host startet die nächste Runde", 22, Color(1, 1, 1, 0.7))
+			if toast_time > 0.0:
+				_text(font, map_size.y * 0.5 + 340.0, toast, 24, GOLD)
+		else:
+			_text(font, map_size.y * 0.5 + 30.0, "%s (%s)" % [level["label"], level["name"]], 26, Color(1, 1, 1, 0.8))
 		if reward > 0:
 			_text(font, map_size.y * 0.5 + 78.0, "+%d Münzen" % reward, 30, GOLD)
 		for b in _buttons():
