@@ -1074,6 +1074,7 @@ func _draw_main(font: Font) -> void:
 	_text(font, off + 190.0, "Erobere alle Kreise", 26, Color(1, 1, 1, 0.7))
 	_text(font, off + 330.0, "Münzen: %d" % coins, 40, GOLD)
 	_draw_buttons(font)
+	_text(font, off + 1256.0, "Danke an B4Players und N4Players!", 22, Color(GOLD, 0.85))
 	if dev_mode:
 		_text(font, off + 1058.0, "Developer", 18, Color(1, 1, 1, 0.5))
 
