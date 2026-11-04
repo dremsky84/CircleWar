@@ -44,19 +44,19 @@ const COLORS := {
 # bonus: Vorliebe für Angriffe auf Spielerkreise, attacks: Angriffe pro Entscheidung.
 const LEVELS := [
 	{"label": "Sehr leicht", "name": "Kiesel", "mode": "random", "interval": 5.0,
-		"growth": 0.6, "margin": 1.0, "share": 0.5, "bonus": 1.0, "attacks": 1,
+		"growth": 0.6, "margin": 1.0, "share": 0.5, "bonus": 1.0, "attacks": 1, "buy": 0.0,
 		"info": "Greift selten und planlos an, wächst langsamer."},
 	{"label": "Leicht", "name": "Wächter", "mode": "attack", "interval": 3.5,
-		"growth": 0.75, "margin": 1.6, "share": 0.0, "bonus": 1.0, "attacks": 1,
+		"growth": 0.75, "margin": 1.6, "share": 0.0, "bonus": 1.0, "attacks": 1, "buy": 0.0,
 		"info": "Greift nur an, wenn der Sieg sicher ist."},
 	{"label": "Mittel", "name": "Sturm", "mode": "attack", "interval": 3.8,
-		"growth": 0.9, "margin": 1.4, "share": 0.7, "bonus": 1.3, "attacks": 1,
+		"growth": 0.9, "margin": 1.4, "share": 0.7, "bonus": 1.3, "attacks": 1, "buy": 0.25,
 		"info": "Angriffslustig und schickt fast alles los."},
 	{"label": "Schwer", "name": "Stratege", "mode": "attack", "interval": 1.0,
-		"growth": 1.0, "margin": 1.1, "share": 0.0, "bonus": 1.5, "attacks": 2,
+		"growth": 1.0, "margin": 1.1, "share": 0.0, "bonus": 1.5, "attacks": 2, "buy": 0.5,
 		"info": "Wählt günstige Ziele und rechnet genau."},
 	{"label": "Unspielbar", "name": "Kollektiv", "mode": "attack", "interval": 0.5,
-		"growth": 1.3, "margin": 1.1, "share": 0.0, "bonus": 2.0, "attacks": 3,
+		"growth": 1.3, "margin": 1.1, "share": 0.0, "bonus": 2.0, "attacks": 3, "buy": 0.8,
 		"info": "Blitzschnell, greift mehrfach an und wächst schneller."},
 ]
 
@@ -82,6 +82,22 @@ const TYPES := {
 	"star": {"label": "Schnell", "shape": "star", "shape_name": "Stern",
 		"power": 0.8, "speed": 1.4, "cost": 500, "desc": "Weniger Schaden, aber schneller."},
 }
+
+# Planeten-Upgrades (bezahlt mit der Armee auf dem Planeten, je 3 Stufen, gehen bei Eroberung verloren)
+const UP_KINDS := ["shield", "gun", "boost"]
+const UP_MAX := 3
+const UP_COSTS := {"shield": [6, 10, 15], "gun": [8, 12, 18], "boost": [5, 8, 12]}
+const UP_INFO := {
+	"shield": {"label": "Schutzschild", "desc": "Verteidigung ×1,2 · ×1,4 · ×1,6"},
+	"gun": {"label": "Abwehrgeschütz", "desc": "Beschießt Feinde in Reichweite: 2 · 3 · 4 Schaden"},
+	"boost": {"label": "Beschleunigungsfeld", "desc": "Entsandte Armeen +25 · +50 · +75 % schneller"},
+}
+const SHIELD_MULT := [1.0, 1.2, 1.4, 1.6]
+const GUN_DAMAGE := [0.0, 2.0, 3.0, 4.0]
+const GUN_RANGE := [0.0, 100.0, 120.0, 140.0]   # Reichweite ab Kreisrand
+const GUN_INTERVAL := 0.9
+const BOOST_MULT := [1.0, 1.25, 1.5, 1.75]
+const AI_KEEP := 10.0          # so viel Armee lässt die KI nach einem Kauf mindestens übrig
 
 # Münzen pro Sieg je Schwierigkeit (bei 12 Kreisen)
 const REWARDS := [20, 40, 70, 110, 160]
@@ -149,6 +165,11 @@ var audio_cache: Dictionary = {}
 var sfx_last: Dictionary = {}
 var music_track := ""
 var over_sound := false
+# Upgrade-Pause: Spiel steht, solange jemand Upgrades kauft; alle Spieler müssen "Weiter" drücken
+var shop_pause := false
+var shop_planet := -1
+var shop_votes := {1: false, 2: true}   # lokal: 1 = ich, 2 = Gegner (KI zählt immer als bereit)
+var press_pos := Vector2.ZERO
 var title_taps := 0            # Geheimcode: 5x auf den Titel tippen
 var title_tap_time := 0
 var toast := ""
@@ -350,6 +371,9 @@ func start_game() -> void:
 	reward_paid = false
 	paused = false
 	over_sound = false
+	shop_pause = false
+	shop_planet = -1
+	shop_votes = {1: false, 2: mp_role == ""}
 	fx.clear()
 	level = LEVELS[difficulty]
 	_compute_stats()
@@ -377,7 +401,8 @@ func _place_circles() -> void:
 
 
 func _make_circle(pos: Vector2, value: float, owner: int) -> Dictionary:
-	return {"pos": pos, "value": value, "owner": owner, "radius": _radius_for(value)}
+	return {"pos": pos, "value": value, "owner": owner, "radius": _radius_for(value),
+		"shield": 0, "gun": 0, "boost": 0, "gun_t": 0.0}
 
 
 func _radius_for(value: float) -> float:
@@ -465,6 +490,41 @@ func _workshop_rows() -> Array:
 	return rows
 
 
+# Panel mit den Upgrades des gewählten Planeten: auf der Hälfte, in der der Planet nicht liegt
+func _shop_panel_rect() -> Rect2:
+	var h := 330.0
+	if shop_planet >= 0 and shop_planet < circles.size() and circles[shop_planet]["pos"].y > map_size.y * 0.5:
+		return Rect2(20.0, 110.0, map_size.x - 40.0, h)
+	return Rect2(20.0, map_size.y - h - 110.0, map_size.x - 40.0, h)
+
+
+func _up_cost(c: Dictionary, kind: String) -> int:
+	var lvl: int = c[kind]
+	return 0 if lvl >= UP_MAX else int(UP_COSTS[kind][lvl])
+
+
+func _shop_rows() -> Array:
+	var rows := []
+	if shop_planet < 0 or shop_planet >= circles.size():
+		return rows
+	var c: Dictionary = circles[shop_planet]
+	var pr := _shop_panel_rect()
+	for i in UP_KINDS.size():
+		var kind: String = UP_KINDS[i]
+		var lvl: int = c[kind]
+		var cost := _up_cost(c, kind)
+		var maxed := lvl >= UP_MAX
+		rows.append({
+			"kind": kind,
+			"rect": Rect2(pr.position.x + 12.0, pr.position.y + 62.0 + i * 86.0, pr.size.x - 24.0, 80.0),
+			"title": "%s  (Stufe %d/%d)" % [UP_INFO[kind]["label"], lvl, UP_MAX],
+			"desc": UP_INFO[kind]["desc"],
+			"btn": "Max" if maxed else "%d Armee" % cost,
+			"enabled": (not maxed) and c["value"] - float(cost) >= 1.0,
+		})
+	return rows
+
+
 # Liefert die aktuell sichtbaren Knöpfe als [{id, rect, label, size, lines, enabled}]
 func _buttons() -> Array:
 	var list := []
@@ -544,7 +604,16 @@ func _buttons() -> Array:
 					list.append(_btn("again", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 110.0, gw, 90.0), "Nochmal"))
 				list.append(_btn("tomenu", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 220.0, gw, 90.0), "Menü"))
 			else:
-				if paused:
+				if shop_pause:
+					var mine: bool = shop_votes[1]
+					list.append(_btn("shop_resume", Rect2(map_size.x - 190.0, 16.0, 170.0, 56.0),
+						"Warte …" if mine else "Weiter", 26, [], not mine))
+					if shop_planet >= 0:
+						for row in _shop_rows():
+							var r: Rect2 = row["rect"]
+							list.append(_btn("ub_" + row["kind"], Rect2(r.position.x + r.size.x - 180.0, r.position.y + 14.0, 164.0, 52.0),
+								row["btn"], 22, [], row["enabled"]))
+				elif paused:
 					var pw := 400.0
 					var py := map_size.y * 0.5 - 130.0
 					list.append(_btn("resume", Rect2(cx - pw * 0.5, py, pw, 100.0), "Fortfahren", 38))
@@ -589,6 +658,8 @@ func _is_active(id: String) -> bool:
 func _activate(id: String) -> void:
 	_play_sfx("click")
 	match id:
+		"shop_resume":
+			_shop_vote_self()
 		"toggle_music":
 			music_on = not music_on
 			_save_settings()
@@ -701,7 +772,9 @@ func _activate(id: String) -> void:
 		"dev_tool_off":
 			dev_tool = ""
 		_:
-			if id.begins_with("join_"):
+			if id.begins_with("ub_"):
+				_shop_buy_request(id.substr(3))
+			elif id.begins_with("join_"):
 				_mp_join(id.substr(5))
 			elif id.begins_with("buy_"):
 				_buy_upgrade(id.substr(4))
@@ -803,6 +876,16 @@ func _on_press(pos: Vector2) -> void:
 		return
 	if state != State.PLAYING or game_over:
 		return
+	if shop_pause:
+		if shop_planet >= 0 and _shop_panel_rect().has_point(pos):
+			return
+		var hit := _circle_at(pos)
+		if hit >= 0 and circles[hit]["owner"] == 1:
+			_shop_open(hit)
+		else:
+			shop_planet = -1
+		queue_redraw()
+		return
 	if paused and dev_mode and dev_open and _panel_rect().has_point(pos):
 		return  # Berührungen auf dem Panel gehen nicht ins Spielfeld durch
 	if dev_mode and dev_tool != "" and mp_role == "":
@@ -812,6 +895,7 @@ func _on_press(pos: Vector2) -> void:
 		return
 	drag_active = true
 	drag_pos = pos
+	press_pos = pos
 	hold_target = -1
 	hold_time = 0.0
 	press_index = _circle_at(pos)
@@ -841,6 +925,8 @@ func _on_release(pos: Vector2) -> void:
 			if target == hold_target:
 				percent = _hold_percent()
 			_player_send(press_index, target, percent)
+		elif target == press_index and not shop_pause:
+			_shop_open(press_index)  # Antippen eines eigenen Planeten: Upgrades
 	else:
 		selected = -1
 	press_index = -1
@@ -931,6 +1017,7 @@ func _send_amount(owner: int, src: int, dst: int, amount: float) -> bool:
 		"to": circles[dst]["pos"],
 		"owner": owner,
 		"amount": amount,
+		"boost": BOOST_MULT[int(circles[src]["boost"])],
 		"target": dst,
 		"src": src,
 		"progress": 0.0,
@@ -947,7 +1034,7 @@ func _resolve(army: Dictionary) -> void:
 		dst["value"] += army["amount"]
 		return
 	var atk: float = army["amount"] * _power(owner)
-	var dfn: float = dst["value"] * _power(dst["owner"])
+	var dfn: float = dst["value"] * _power(dst["owner"]) * _shield(dst)
 	_spawn_fx(dst, owner, atk > dfn)
 	_battle_sound(owner, dst["owner"], atk > dfn)
 	if atk > dfn and (owner == 1 or dst["owner"] == 1):
@@ -957,8 +1044,12 @@ func _resolve(army: Dictionary) -> void:
 	if atk > dfn:
 		dst["owner"] = owner
 		dst["value"] = (atk - dfn) / _power(owner)
+		dst["shield"] = 0  # Upgrades gehen bei der Eroberung verloren
+		dst["gun"] = 0
+		dst["boost"] = 0
+		dst["gun_t"] = 0.0
 	else:
-		dst["value"] = (dfn - atk) / _power(dst["owner"])
+		dst["value"] = (dfn - atk) / (_power(dst["owner"]) * _shield(dst))
 
 
 # Kampfeffekt: Blitze und Funken um den umkämpften Kreis (nicht im Headless-Betrieb)
@@ -982,6 +1073,12 @@ func _spawn_fx(dst: Dictionary, attacker: int, conquered: bool) -> void:
 		"age": 0.0, "dur": 0.7 if conquered else 0.5, "big": conquered})
 
 
+func _spawn_shot(from: Vector2, to: Vector2, color: Color) -> void:
+	if DisplayServer.get_name() == "headless" or fx.size() > 60:
+		return
+	fx.append({"kind": "shot", "from": from, "to": to, "color": color, "age": 0.0, "dur": 0.18})
+
+
 func _update_fx(delta: float) -> void:
 	for e in fx.duplicate():
 		e["age"] += delta
@@ -993,6 +1090,11 @@ func _draw_fx() -> void:
 	for e in fx:
 		var t: float = e["age"] / e["dur"]
 		var a := 1.0 - t
+		if e.get("kind", "") == "shot":
+			draw_line(e["from"], e["to"], Color(1.0, 0.7, 0.2, a), 4.0)
+			draw_line(e["from"], e["to"], Color(1, 1, 0.9, a), 1.5)
+			draw_circle(e["to"], 7.0 * a + 2.0, Color(1.0, 0.8, 0.3, a))
+			continue
 		var p: Vector2 = e["pos"]
 		var col: Color = e["color"]
 		draw_arc(p, e["radius"] + 4.0 + t * (46.0 if e["big"] else 30.0), 0.0, TAU, 48,
@@ -1035,10 +1137,13 @@ func _process(delta: float) -> void:
 		_pay_reward()
 	_mp_process(delta)
 	_update_music()
+	if game_over and shop_pause:
+		shop_pause = false
+		shop_planet = -1
 	if state == State.PLAYING and game_over and not over_sound:
 		over_sound = true
 		_play_sfx("win" if winner == 1 else "lose")
-	var running := state == State.PLAYING and not game_over and not paused and mp_role != "client"
+	var running := state == State.PLAYING and not game_over and not paused and not shop_pause and mp_role != "client"
 	if running:
 		_update_hold(delta)
 		_tick(delta * SPEEDS[dev_speed_index])
@@ -1056,10 +1161,12 @@ func _tick(delta: float) -> void:
 
 	for army in armies.duplicate():
 		var dist: float = maxf(army["from"].distance_to(army["to"]), 1.0)
-		army["progress"] += ARMY_SPEED * _speed(army["owner"]) * delta / dist
+		army["progress"] += ARMY_SPEED * _speed(army["owner"]) * float(army.get("boost", 1.0)) * delta / dist
 		if army["progress"] >= 1.0:
 			armies.erase(army)
 			_resolve(army)
+
+	_guns(delta)
 
 	if mp_role == "" and not dev_ai_frozen:
 		ai_timer -= delta
@@ -1068,6 +1175,124 @@ func _tick(delta: float) -> void:
 			_ai_think()
 
 	_check_winner()
+
+
+# ---------- Planeten-Upgrades ----------
+
+func _shield(c: Dictionary) -> float:
+	return 1.0 if c["owner"] == 0 else SHIELD_MULT[int(c["shield"])]
+
+
+# Kauf: kostet Armee auf dem Planeten, mindestens 1 bleibt übrig
+func _shop_buy(owner: int, idx: int, kind: String) -> bool:
+	if idx < 0 or idx >= circles.size() or not (kind in UP_KINDS):
+		return false
+	var c: Dictionary = circles[idx]
+	if c["owner"] != owner or int(c[kind]) >= UP_MAX:
+		return false
+	var cost := _up_cost(c, kind)
+	if c["value"] - float(cost) < 1.0:
+		return false
+	c["value"] -= float(cost)
+	c[kind] = int(c[kind]) + 1
+	return true
+
+
+func _shop_buy_request(kind: String) -> void:
+	if shop_planet < 0:
+		return
+	if mp_role == "client":
+		rpc_buy.rpc_id(1, shop_planet, kind)
+		_play_sfx("send")
+	elif _shop_buy(1, shop_planet, kind):
+		_play_sfx("conquer")
+
+
+func _shop_sync() -> void:
+	if mp_role == "host" and mp_peer != null and mp_status == "playing":
+		rpc_shop_state.rpc(shop_pause, shop_votes[1], shop_votes[2])
+
+
+# Eigenen Planeten für Upgrades öffnen; das Spiel pausiert für alle
+func _shop_open(idx: int) -> void:
+	shop_planet = idx
+	selected = -1
+	drag_active = false
+	shop_votes[1] = false
+	if mp_role == "client":
+		shop_pause = true
+		rpc_shop_open.rpc_id(1)
+	else:
+		shop_pause = true
+		shop_votes[2] = mp_role == "" or shop_votes[2]
+		_shop_sync()
+
+
+# "Weiter" gedrückt: erst wenn alle bereit sind, läuft das Spiel weiter
+func _shop_vote_self() -> void:
+	shop_votes[1] = true
+	shop_planet = -1
+	if mp_role == "client":
+		rpc_shop_vote.rpc_id(1)
+	else:
+		_shop_check_resume()
+		_shop_sync()
+
+
+func _shop_check_resume() -> void:
+	if shop_votes[1] and shop_votes[2]:
+		shop_pause = false
+		shop_planet = -1
+		shop_votes = {1: false, 2: mp_role == ""}
+
+
+# Abwehrgeschütze: schießen alle 0,9 s auf die nächste feindliche Armee in Reichweite
+func _guns(delta: float) -> void:
+	for ci in circles.size():
+		var c: Dictionary = circles[ci]
+		var lvl := int(c["gun"])
+		if lvl <= 0 or c["owner"] == 0:
+			continue
+		c["gun_t"] = maxf(float(c["gun_t"]) - delta, 0.0)
+		if c["gun_t"] > 0.0:
+			continue
+		var reach: float = c["radius"] + GUN_RANGE[lvl]
+		var best: Dictionary = {}
+		var best_d := INF
+		var best_pos := Vector2.ZERO
+		for a in armies:
+			if a["owner"] == c["owner"]:
+				continue
+			var ap: Vector2 = a["from"].lerp(a["to"], a["progress"])
+			var d := ap.distance_to(c["pos"])
+			if d <= reach and d < best_d:
+				best_d = d
+				best = a
+				best_pos = ap
+		if best.is_empty():
+			continue
+		c["gun_t"] = GUN_INTERVAL
+		best["amount"] -= GUN_DAMAGE[lvl]
+		_spawn_shot(c["pos"], best_pos, COLORS[c["owner"]])
+		if mp_role == "host" and mp_peer != null and mp_status == "playing":
+			rpc_shot.rpc(ci, best_pos.x / map_size.x, best_pos.y / map_size.y)
+		if best["amount"] <= 0.0:
+			armies.erase(best)
+
+
+# KI kauft (je nach Stufe) auf ihren Planeten Upgrades, ein Kauf pro Entscheidung
+func _ai_buy(own: Array) -> void:
+	var chance: float = level["buy"]
+	if chance <= 0.0:
+		return
+	for i in own:
+		if rng.randf() > chance:
+			continue
+		var c: Dictionary = circles[i]
+		for kind in UP_KINDS:
+			if int(c[kind]) < UP_MAX and c["value"] - float(_up_cost(c, kind)) >= AI_KEEP:
+				if _shop_buy(2, i, kind):
+					return
 
 
 # ---------- Audio ----------
@@ -1293,7 +1518,8 @@ func _pack_circles() -> PackedFloat32Array:
 		var o: int = c["owner"]
 		out.append_array(PackedFloat32Array([
 			c["pos"].x / map_size.x, c["pos"].y / map_size.y, c["value"], float(o),
-			BASE_GROWTH * _growth(o) if o != 0 else 0.0, c["radius"]]))
+			BASE_GROWTH * _growth(o) if o != 0 else 0.0, c["radius"],
+			float(c["shield"]), float(c["gun"]), float(c["boost"])]))
 	return out
 
 
@@ -1303,26 +1529,30 @@ func _pack_armies() -> PackedFloat32Array:
 		var dist: float = maxf(a["from"].distance_to(a["to"]), 1.0)
 		out.append_array(PackedFloat32Array([
 			float(a["src"]), float(a["target"]), float(a["owner"]), a["amount"], a["progress"],
-			ARMY_SPEED * _speed(a["owner"]) / dist]))
+			ARMY_SPEED * _speed(a["owner"]) * float(a.get("boost", 1.0)) / dist]))
 	return out
 
 
 # Client: Kreise aus den Host-Daten übernehmen (gespiegelt, Seiten getauscht)
 func _apply_circles(c: PackedFloat32Array, full: bool) -> void:
-	var n := c.size() / 6
+	var n := c.size() / 9
 	if full:
 		circles.clear()
 		for i in n:
-			circles.append({"pos": Vector2.ZERO, "value": 0.0, "owner": 0, "radius": 0.0, "rate": 0.0})
+			circles.append({"pos": Vector2.ZERO, "value": 0.0, "owner": 0, "radius": 0.0, "rate": 0.0,
+				"shield": 0, "gun": 0, "boost": 0, "gun_t": 0.0})
 	if circles.size() != n:
 		return
 	for i in n:
 		var d: Dictionary = circles[i]
-		d["pos"] = Vector2(c[i * 6] * map_size.x, (1.0 - c[i * 6 + 1]) * map_size.y)
-		d["value"] = c[i * 6 + 2]
-		d["owner"] = _swap(int(c[i * 6 + 3]))
-		d["rate"] = c[i * 6 + 4]
-		d["radius"] = c[i * 6 + 5]
+		d["pos"] = Vector2(c[i * 9] * map_size.x, (1.0 - c[i * 9 + 1]) * map_size.y)
+		d["value"] = c[i * 9 + 2]
+		d["owner"] = _swap(int(c[i * 9 + 3]))
+		d["rate"] = c[i * 9 + 4]
+		d["radius"] = c[i * 9 + 5]
+		d["shield"] = int(c[i * 9 + 6])
+		d["gun"] = int(c[i * 9 + 7])
+		d["boost"] = int(c[i * 9 + 8])
 
 
 func _apply_armies(a: PackedFloat32Array) -> void:
@@ -1373,6 +1603,9 @@ func rpc_begin(c: PackedFloat32Array) -> void:
 	reward_paid = true
 	paused = false
 	over_sound = false
+	shop_pause = false
+	shop_planet = -1
+	shop_votes = {1: false, 2: false}
 	level = LEVELS[difficulty]
 	_compute_stats()
 	mp_status = "playing"
@@ -1409,9 +1642,51 @@ func rpc_fx(idx: int, attacker: int, conquered: bool) -> void:
 		Input.vibrate_handheld(60)
 
 
+@rpc("authority", "reliable")
+func rpc_shop_state(active: bool, vote_host: bool, vote_client: bool) -> void:
+	if mp_role != "client" or game_over:
+		return
+	shop_pause = active
+	shop_votes = {1: vote_client, 2: vote_host}
+	if not active:
+		shop_planet = -1
+
+
+@rpc("authority", "unreliable")
+func rpc_shot(idx: int, nx: float, ny: float) -> void:
+	if mp_role != "client" or idx < 0 or idx >= circles.size():
+		return
+	_spawn_shot(circles[idx]["pos"], Vector2(nx * map_size.x, (1.0 - ny) * map_size.y), COLORS[circles[idx]["owner"]])
+
+
+@rpc("any_peer", "reliable")
+func rpc_shop_open() -> void:
+	if mp_role != "host" or game_over or mp_status != "playing":
+		return
+	shop_pause = true
+	shop_votes[2] = false
+	_shop_sync()
+
+
+@rpc("any_peer", "reliable")
+func rpc_shop_vote() -> void:
+	if mp_role != "host" or game_over or mp_status != "playing" or not shop_pause:
+		return
+	shop_votes[2] = true
+	_shop_check_resume()
+	_shop_sync()
+
+
+@rpc("any_peer", "reliable")
+func rpc_buy(idx: int, kind: String) -> void:
+	if mp_role != "host" or game_over or mp_status != "playing" or not shop_pause:
+		return
+	_shop_buy(2, idx, kind)
+
+
 @rpc("any_peer", "reliable")
 func rpc_command(src: int, dst: int, percent: int) -> void:
-	if mp_role != "host" or game_over or mp_status != "playing":
+	if mp_role != "host" or game_over or mp_status != "playing" or shop_pause:
 		return
 	if src < 0 or src >= circles.size() or dst < 0 or dst >= circles.size():
 		return
@@ -1457,7 +1732,8 @@ func _mp_process(delta: float) -> void:
 	# Client: weiterrechnen
 	if mp_role == "client" and mp_status == "playing" and state == State.PLAYING and not game_over:
 		_update_hold(delta)
-		_client_tick(delta)
+		if not shop_pause:
+			_client_tick(delta)
 
 
 # ---------- Gegner-KI ----------
@@ -1473,9 +1749,13 @@ func _ai_think() -> void:
 		return
 
 	var attacks: int = level["attacks"]
+	var attacked := false
 	for i in attacks:
 		if not _ai_attack(own, others):
 			break
+		attacked = true
+	if not attacked:
+		_ai_buy(own)  # kein Angriff möglich: Armee in Upgrades stecken
 
 
 # Kiesel: zufälliger Kreis schickt einen Teil seiner Armee auf ein zufälliges Ziel
@@ -1528,13 +1808,16 @@ func _needed(owner: int, src: int, dst: int, count_inflight: bool = true) -> flo
 	var dst_owner: int = circles[dst]["owner"]
 	var atk := _power(owner)
 	if dst_owner != 0 and dst_owner != owner:
-		v += BASE_GROWTH * _growth(dst_owner) * dist / (ARMY_SPEED * _speed(owner))
-	var eff := v * _power(dst_owner)
+		v += BASE_GROWTH * _growth(dst_owner) * dist / (ARMY_SPEED * _speed(owner) * BOOST_MULT[int(circles[src]["boost"])])
+	var eff := v * _power(dst_owner) * _shield(circles[dst])
 	if count_inflight:
 		for a in armies:
 			if a["target"] == dst and a["owner"] == owner:
 				eff -= a["amount"] * atk
-	return maxf(eff, 0.0) / atk
+	var loss := 0.0
+	if dst_owner != owner and dst_owner != 0:
+		loss = GUN_DAMAGE[int(circles[dst]["gun"])] * 2.5  # Abwehrgeschütz schießt unterwegs
+	return maxf(eff, 0.0) / atk + loss
 
 
 func _indices_with_owner(owner: int) -> Array:
@@ -1737,6 +2020,9 @@ func _draw_game(font: Font) -> void:
 		draw_circle(c["pos"], c["radius"], COLORS[c["owner"]])
 		if i == selected:
 			draw_arc(c["pos"], c["radius"] + 8.0, 0.0, TAU, 48, Color.WHITE, 3.0)
+		_draw_badges(c)
+		if shop_pause and i == shop_planet:
+			draw_arc(c["pos"], c["radius"] + 12.0, 0.0, TAU, 48, GOLD, 4.0)
 		var label := "%.1f" % c["value"] if (dev_mode and dev_info) else str(int(c["value"]))
 		var label_size := 24 if (dev_mode and dev_info) else 28
 		draw_string(font, c["pos"] + Vector2(-c["radius"], label_size * 0.35), label,
@@ -1783,6 +2069,9 @@ func _draw_game(font: Font) -> void:
 		"Wischen = %d %%, Ziel halten = mehr" % int(SEND_FRACTION * 100),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 20, Color(1, 1, 1, 0.8))
 
+	if shop_pause and not game_over:
+		_draw_shop(font)
+
 	if dev_mode:
 		_draw_dev_overlay(font)
 
@@ -1815,6 +2104,47 @@ func _draw_game(font: Font) -> void:
 
 
 # Developer-Anzeigen: Werkzeug, Pause und (optional) Diagnosewerte
+# Upgrades am Planeten: Schildringe (blau), Geschützpunkte oben (orange), Beschleunigerpunkte unten (grün)
+func _draw_badges(c: Dictionary) -> void:
+	var r: float = c["radius"]
+	var pos: Vector2 = c["pos"]
+	for k in int(c["shield"]):
+		draw_arc(pos, r + 5.0 + k * 4.0, 0.0, TAU, 48, Color(0.45, 0.85, 1.0, 0.85), 2.5)
+	var g := int(c["gun"])
+	for k in g:
+		var ang := -PI * 0.5 + (k - (g - 1) * 0.5) * 0.45
+		draw_circle(pos + Vector2.RIGHT.rotated(ang) * (r + 18.0), 5.0, Color(1.0, 0.6, 0.15))
+	var b := int(c["boost"])
+	for k in b:
+		var ang2 := PI * 0.5 + (k - (b - 1) * 0.5) * 0.45
+		draw_circle(pos + Vector2.RIGHT.rotated(ang2) * (r + 18.0), 5.0, Color(0.4, 0.95, 0.45))
+
+
+func _draw_shop(font: Font) -> void:
+	draw_rect(Rect2(Vector2.ZERO, map_size), Color(0, 0, 0, 0.35), true)
+	var mine: bool = shop_votes[1]
+	var other: bool = shop_votes[2]
+	var note := "PAUSE – eigenen Planeten antippen für Upgrades"
+	if mine and not other:
+		note = "PAUSE – warte auf den Gegner …"
+	elif other and not mine and mp_role != "":
+		note = "PAUSE – der Gegner ist bereit"
+	_text(font, map_size.y * 0.5, note, 22, Color(1, 1, 1, 0.9))
+	if shop_planet < 0:
+		return
+	var pr := _shop_panel_rect()
+	draw_rect(pr, Color("#1b2029"), true)
+	draw_rect(pr, Color(1, 1, 1, 0.2), false, 2.0)
+	var c: Dictionary = circles[shop_planet]
+	draw_string(font, pr.position + Vector2(16, 38), "Upgrades – Armee: %d" % int(c["value"]),
+		HORIZONTAL_ALIGNMENT_LEFT, -1, 28, GOLD)
+	for row in _shop_rows():
+		var r: Rect2 = row["rect"]
+		draw_rect(r, Color("#232a36"), true)
+		draw_string(font, r.position + Vector2(12, 30), row["title"], HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 190.0, 22, Color.WHITE)
+		draw_string(font, r.position + Vector2(12, 60), row["desc"], HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 190.0, 15, Color(1, 1, 1, 0.65))
+
+
 func _draw_dev_overlay(font: Font) -> void:
 	var y := 102.0
 	if dev_tool != "":

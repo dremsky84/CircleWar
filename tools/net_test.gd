@@ -31,14 +31,36 @@ func _initialize() -> void:
 			if g.state == Game.State.PLAYING:
 				break
 		check(g.state == Game.State.PLAYING and g.mp_status == "playing", "Host: Spiel gestartet")
-		await wait(3.0)
-		# Befehl des Clients muss angekommen sein: Armee des Gegners unterwegs oder Kreis erobert
-		var enemy_sent := false
+		await wait(2.0)
+		# Befehl des Clients muss angekommen sein
+		var sent := false
 		for a in g.armies:
 			if a["owner"] == 2:
-				enemy_sent = true
-		check(enemy_sent or g.circles[1]["value"] < 15.0, "Host: Befehl vom Client wirkt")
-		await wait(2.0)
+				sent = true
+		check(sent or g.circles[1]["value"] < 15.0, "Host: Befehl vom Client wirkt")
+		# Upgrade-Pause: Client öffnet Planet und kauft ein Schutzschild
+		for i in 100:
+			await wait(0.1)
+			if g.shop_pause:
+				break
+		check(g.shop_pause, "Host: Pause durch Client")
+		var frozen: float = g.circles[0]["value"]
+		for i in 100:
+			await wait(0.1)
+			if g.circles[1]["shield"] == 1:
+				break
+		check(g.circles[1]["shield"] == 1, "Host: Kauf des Clients angekommen")
+		check(absf(g.circles[0]["value"] - frozen) < 0.01, "Host: Spiel steht in der Pause")
+		g._shop_open(0)
+		g._shop_vote_self()
+		await wait(0.6)
+		check(g.shop_pause, "Host: wartet auf Client-Weiter")
+		for i in 100:
+			await wait(0.1)
+			if not g.shop_pause:
+				break
+		check(not g.shop_pause, "Host: Spiel läuft nach beiden Weiter weiter")
+		await wait(1.0)
 		g._force_end(1)
 		await wait(1.0)
 	else:
@@ -65,7 +87,32 @@ func _initialize() -> void:
 		g._player_send(mine, target, 50)
 		await wait(1.0)
 		check(g.armies.size() > 0 or g.circles[mine]["value"] < 14.0, "Client: Armee sichtbar")
-		await wait(3.5)
+		# Upgrade-Pause: Client öffnet den eigenen Planeten und kauft ein Schutzschild
+		for i in 100:
+			if g.circles[mine]["value"] >= 8.0:
+				break
+			await wait(0.1)
+		g._shop_open(mine)
+		await wait(0.5)
+		check(g.shop_pause, "Client: Pause aktiv")
+		g._shop_buy_request("shield")
+		for i in 50:
+			await wait(0.1)
+			if g.circles[mine]["shield"] == 1:
+				break
+		check(g.circles[mine]["shield"] == 1, "Client: Schild sichtbar")
+		await wait(2.0)
+		check(g.shop_pause, "Client: Pause hält, bis beide Weiter drücken")
+		g._shop_vote_self()
+		for i in 60:
+			await wait(0.1)
+			if not g.shop_pause:
+				break
+		check(not g.shop_pause, "Client: Spiel läuft weiter")
+		for i in 50:
+			if g.game_over:
+				break
+			await wait(0.1)
 		check(g.game_over and g.winner == 2, "Client: Spielende (Host-Sieg = Client verliert)")
 	print(role, " fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)

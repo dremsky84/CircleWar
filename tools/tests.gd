@@ -109,6 +109,66 @@ func _initialize() -> void:
 	d._on_press(tp); d._on_press(tp); d._on_press(Vector2(10, 700)); d._on_press(tp); d._on_press(tp); d._on_press(tp)
 	check(not d.dev_mode, "Unterbrechung setzt zurück")
 	d.free()
+	# Planeten-Upgrades
+	var u = Game.new()
+	root.add_child(u)
+	u.map_size = Vector2(720, 1280)
+	u.rng.seed = 3
+	u.difficulty = 2; u.circle_count = 8
+	u.start_game()
+	u.ai_timer = 1e9
+	var c0: Dictionary = u.circles[0]
+	c0["value"] = 30.0
+	check(u._shop_buy(1, 0, "shield") and c0["value"] == 24.0 and c0["shield"] == 1, "Schild gekauft (6)")
+	check(not u._shop_buy(2, 0, "gun"), "fremder Planet nicht kaufbar")
+	c0["value"] = 7.0
+	check(not u._shop_buy(1, 0, "shield"), "zu wenig Armee (Stufe 2 kostet 10)")
+	check(not u._shop_buy(1, 0, "gun") , "Geschütz 8 > 7-1")
+	c0["value"] = 20.0; c0["shield"] = 3
+	check(not u._shop_buy(1, 0, "shield"), "Stufe 3 ist Maximum")
+	# Schutzschild: 10 Verteidiger x1.6 = 16 gegen 15 Angreifer -> hält
+	c0["value"] = 10.0
+	u._resolve({"owner": 2, "target": 0, "amount": 15.0})
+	check(u.circles[0]["owner"] == 1 and absf(u.circles[0]["value"] - 1.0 / 1.6) < 0.01, "Schild verteidigt")
+	# Eroberung löscht Upgrades
+	c0["value"] = 3.0
+	u._resolve({"owner": 2, "target": 0, "amount": 20.0})
+	check(u.circles[0]["owner"] == 2 and c0["shield"] == 0, "Upgrades weg nach Eroberung")
+	# Beschleunigung: Armee bekommt Faktor
+	var c1: Dictionary = u.circles[1]
+	c1["owner"] = 2; c1["value"] = 20.0; c1["boost"] = 2
+	u._send_amount(2, 1, 3, 5.0)
+	check(absf(u.armies[u.armies.size() - 1]["boost"] - 1.5) < 0.001, "Boost-Faktor")
+	# Geschütz schießt auf feindliche Armee in Reichweite
+	u.armies.clear()
+	var pos3: Vector2 = u.circles[3]["pos"]
+	u.circles[3]["owner"] = 1; u.circles[3]["gun"] = 2; u.circles[3]["gun_t"] = 0.0
+	u.armies.append({"from": pos3 + Vector2(60, 0), "to": pos3 + Vector2(600, 0), "owner": 2, "amount": 10.0,
+		"target": 0, "src": 1, "progress": 0.0, "boost": 1.0})
+	u._guns(0.1)
+	check(absf(u.armies[0]["amount"] - 7.0) < 0.001, "Geschütz Stufe 2: 3 Schaden")
+	u._guns(0.1)
+	check(absf(u.armies[0]["amount"] - 7.0) < 0.001, "Feuerpause")
+	u.armies[0]["amount"] = 2.0; u.circles[3]["gun_t"] = 0.0
+	u._guns(0.1)
+	check(u.armies.is_empty(), "Armee zerstört")
+	# Pause: Antippen eines eigenen Planeten, Spiel steht, Weiter setzt fort
+	var v2: float = u.circles[2]["value"]
+	u.circles[2]["owner"] = 1
+	u._shop_open(2)
+	check(u.shop_pause and u.shop_planet == 2, "Upgrade-Pause an")
+	u._process(1.0)
+	check(u.circles[2]["value"] == v2, "Spiel steht in der Upgrade-Pause")
+	u._shop_vote_self()
+	check(not u.shop_pause, "Solo: Weiter setzt fort")
+	# KI kauft (Schwer)
+	u.level = Game.LEVELS[4]
+	u.circles[1]["value"] = 40.0; u.circles[1]["owner"] = 2
+	for k in 40:
+		u._ai_buy([1])
+	check(u.circles[1]["shield"] + u.circles[1]["gun"] + u.circles[1]["boost"] > 0, "KI kauft")
+	check(u.circles[1]["value"] >= Game.AI_KEEP - 0.01, "KI behält Reserve")
+	u.free()
 	h.free()
 	print("Tests fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)

@@ -29,6 +29,7 @@ func _initialize() -> void:
 			"type": type_id = kv[1]
 			"upg": upg = int(kv[1])
 			"enemy": enemy = kv[1] == "1"
+			"botbuy": buy_chance = float(kv[1])
 			"bot":
 				var parts := kv[1].split(",")
 				interval = float(parts[0])
@@ -101,9 +102,7 @@ func _bot_think(g, margin: float) -> int:
 			if g.circles[src]["owner"] != 1:
 				continue
 			var dist: float = g.circles[src]["pos"].distance_to(g.circles[dst]["pos"])
-			var need: float = g.circles[dst]["value"]
-			if g.circles[dst]["owner"] == 2:
-				need += g.BASE_GROWTH * g._growth(2) * dist / (g.ARMY_SPEED * g._speed(1))
+			var need: float = g._needed(1, src, dst, false)
 			need = need * margin + 1.0
 			var remaining: float = g.circles[src]["value"]
 			var total := 0.0
@@ -121,7 +120,25 @@ func _bot_think(g, margin: float) -> int:
 						best_swipes = k
 					break
 	if best_src < 0:
+		_bot_buy(g)
 		return 0
 	for i in best_swipes:
 		g._try_send(1, best_src, best_dst, g.SEND_FRACTION)
 	return best_swipes
+
+
+# Bot kauft Upgrades wie die KI (mit Wahrscheinlichkeit buy_chance je Entscheidung)
+var buy_chance := 0.4
+
+
+func _bot_buy(g) -> void:
+	if buy_chance <= 0.0:
+		return
+	for i in g.circles.size():
+		var c: Dictionary = g.circles[i]
+		if c["owner"] != 1 or g.rng.randf() > buy_chance:
+			continue
+		for kind in g.UP_KINDS:
+			if int(c[kind]) < g.UP_MAX and c["value"] - float(g._up_cost(c, kind)) >= g.AI_KEEP:
+				if g._shop_buy(1, i, kind):
+					return

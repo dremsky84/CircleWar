@@ -75,3 +75,12 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - Alles selbst erzeugt (keine fremden Dateien): `python3 tools/make_audio.py` schreibt die Dateien nach `audio/` (benötigt numpy, scipy, ffmpeg).
 - Menü-Musik und Spiel-Musik als Schleife; Effekte für Klick, Senden, Kampf, Eroberung, Verlust, Sieg und Niederlage.
 - Im Hauptmenü lassen sich **Musik** und **Sound** getrennt aus- und einschalten (wird gespeichert).
+
+## Planeten-Upgrades
+
+- Eigenen Planeten antippen: Das Spiel pausiert (auch im Mehrspieler, für beide), und du kannst mit der **Armee auf dem Planeten** bezahlen. Mindestens 1 Armee bleibt übrig.
+- **Schutzschild** (6/10/15): Verteidigung ×1,2 / ×1,4 / ×1,6. **Abwehrgeschütz** (8/12/18): schießt alle 0,9 s auf die nächste feindliche Armee in Reichweite (2/3/4 Schaden). **Beschleunigungsfeld** (5/8/12): von hier entsandte Armeen +25/50/75 % schneller.
+- Upgrades gehen bei Eroberung des Planeten verloren. Anzeige am Planeten: blaue Ringe (Schild), orange Punkte oben (Geschütz), grüne Punkte unten (Beschleuniger).
+- Weiter geht es erst, wenn alle Spieler "Weiter" gedrückt haben (Einzelspiel: nur du).
+- Die KI kauft je nach Schwierigkeit (Mittel selten, Unspielbar häufig), wenn sie gerade keinen Angriff starten kann.
+- Simulation: `botbuy=<0..1>` lässt den Bot ebenfalls kaufen.
