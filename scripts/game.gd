@@ -123,6 +123,10 @@ var dev_speed_index := 1
 var dev_ai_frozen := false
 var dev_info := false
 var dev_tool := ""             # "", "owner", "plus", "minus"
+var title_taps := 0            # Geheimcode: 5x auf den Titel tippen
+var title_tap_time := 0
+var toast := ""
+var toast_time := 0.0
 
 
 func _ready() -> void:
@@ -432,8 +436,9 @@ func _buttons() -> Array:
 				list.append(_btn("dev_coins", Rect2(cx - bw * 0.5, off + 1070.0, w, 70.0), "+1000", 22, ["Münzen"]))
 				list.append(_btn("dev_unlock", Rect2(cx - bw * 0.5 + w + 10.0, off + 1070.0, w, 70.0), "Alles", 22, ["freischalten"]))
 				list.append(_btn("dev_reset", Rect2(cx - bw * 0.5 + 2.0 * (w + 10.0), off + 1070.0, w, 70.0), "Fortschritt", 22, ["zurücksetzen"]))
-			list.append(_btn("dev_toggle", Rect2(cx - bw * 0.5, off + 1160.0, bw, 60.0),
-				"Developer Mode: " + ("An" if dev_mode else "Aus"), 22))
+			if dev_mode:
+				list.append(_btn("dev_toggle", Rect2(cx - bw * 0.5, off + 1160.0, bw, 60.0),
+					"Developer Mode: An (ausschalten)", 22))
 		State.SETUP:
 			list.append(_btn("back", Rect2(20.0, off + 16.0, 150.0, 56.0), "Zurück", 26))
 			for i in LEVELS.size():
@@ -651,9 +656,40 @@ func _unhandled_input(event: InputEvent) -> void:
 		queue_redraw()
 
 
+# Titel im Hauptmenü (Tippfläche für den Developer-Geheimcode)
+func _title_rect() -> Rect2:
+	var off := _menu_offset()
+	return Rect2(map_size.x * 0.5 - 200.0, off + 70.0, 400.0, 130.0)
+
+
+# 5 Tipper hintereinander (je höchstens 1,5 s Pause) schalten den Developer Mode um
+func _title_tap() -> void:
+	var now := Time.get_ticks_msec()
+	if now - title_tap_time > 1500:
+		title_taps = 0
+	title_tap_time = now
+	title_taps += 1
+	if title_taps >= 5:
+		title_taps = 0
+		dev_mode = not dev_mode
+		_reset_dev()
+		_save_settings()
+		toast = "Developer Mode " + ("aktiviert" if dev_mode else "deaktiviert")
+		toast_time = 2.0
+		Input.vibrate_handheld(80)
+
+
 func _on_press(pos: Vector2) -> void:
 	press_button = _button_at(pos)
 	if press_button != "":
+		title_taps = 0
+		queue_redraw()
+		return
+	if state == State.MAIN:
+		if _title_rect().has_point(pos):
+			_title_tap()
+		else:
+			title_taps = 0
 		queue_redraw()
 		return
 	if state != State.PLAYING or game_over:
@@ -803,6 +839,8 @@ func _resolve(army: Dictionary) -> void:
 	var atk: float = army["amount"] * _power(owner)
 	var dfn: float = dst["value"] * _power(dst["owner"])
 	_spawn_fx(dst, owner, atk > dfn)
+	if atk > dfn and (owner == 1 or dst["owner"] == 1):
+		Input.vibrate_handheld(60)  # Kreis erobert (oder verloren)
 	if atk > dfn:
 		dst["owner"] = owner
 		dst["value"] = (atk - dfn) / _power(owner)
@@ -878,6 +916,8 @@ func _check_winner() -> void:
 # ---------- Ablauf ----------
 
 func _process(delta: float) -> void:
+	if toast_time > 0.0:
+		toast_time -= delta
 	if state == State.PLAYING and game_over and not reward_paid:
 		_pay_reward()
 	var running := state == State.PLAYING and not game_over and not paused
@@ -1074,6 +1114,8 @@ func _draw_main(font: Font) -> void:
 	_text(font, off + 190.0, "Erobere alle Kreise", 26, Color(1, 1, 1, 0.7))
 	_text(font, off + 330.0, "Münzen: %d" % coins, 40, GOLD)
 	_draw_buttons(font)
+	if toast_time > 0.0:
+		_text(font, off + 250.0, toast, 26, Color(GOLD, minf(1.0, toast_time)))
 	_text(font, off + 1256.0, "Danke an B4Players und N4Players!", 22, Color(GOLD, 0.85))
 	if dev_mode:
 		_text(font, off + 1058.0, "Developer", 18, Color(1, 1, 1, 0.5))

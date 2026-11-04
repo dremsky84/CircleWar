@@ -91,6 +91,24 @@ func _initialize() -> void:
 	check("dev" in ids and "resume" in ids, "Developer im Pause-Menü")
 	g.winner = 1; g.game_over = true
 	check(not g.has_game(), "nach Ende kein Fortfahren")
+	# Geheimcode
+	var d = Game.new()
+	root.add_child(d)
+	d.dev_mode = false
+	d.state = Game.State.MAIN
+	d.map_size = Vector2(720, 1280)
+	var tp: Vector2 = d._title_rect().get_center()
+	for i in 4:
+		d._on_press(tp)
+	check(not d.dev_mode, "4 Tipper reichen nicht")
+	d._on_press(tp)
+	check(d.dev_mode, "5 Tipper aktivieren")
+	for i in 5:
+		d._on_press(tp)
+	check(not d.dev_mode, "5 Tipper deaktivieren")
+	d._on_press(tp); d._on_press(tp); d._on_press(Vector2(10, 700)); d._on_press(tp); d._on_press(tp); d._on_press(tp)
+	check(not d.dev_mode, "Unterbrechung setzt zurück")
+	d.free()
 	h.free()
 	print("Tests fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)
