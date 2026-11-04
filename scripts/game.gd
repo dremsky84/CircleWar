@@ -4,7 +4,7 @@ extends Node2D
 # Hauptmenü -> Spielen (Einstellungen) oder Werkstatt (Verstärkungen, Armeetypen)
 # -> Partie gegen die KI -> Ergebnis mit Münzen
 
-enum State { MAIN, SETUP, WORKSHOP, PLAYING, MULTI }
+enum State { MAIN, SETUP, WORKSHOP, PLAYING, MULTI, EDITOR }
 
 const DESIGN_SIZE := Vector2(720, 1280)
 const EDGE_MARGIN := 80.0      # Abstand der Kreise zum seitlichen/unteren Rand
@@ -108,13 +108,20 @@ const KIND_GOLD := 1
 const KIND_DEAD := 2
 const KIND_HILL := 3
 const KIND_MULT := [1.0, 2.0, 0.0, 1.0]   # Wachstumsfaktor je Planetenart
-const LEVEL_TYPE_IDS := ["classic", "rush", "resource", "hill"]
+const LEVEL_TYPE_IDS := ["classic", "rush", "resource", "hill", "custom"]
 const LEVEL_TYPES := {
 	"classic": {"label": "Classic", "reward": 1.0, "desc": "Zufällige Karte wie gewohnt."},
 	"rush": {"label": "Rush", "reward": 0.8, "desc": "26 kleine Planeten, Wachstum ×1,8: kurz und hektisch."},
 	"resource": {"label": "Rohstoff", "reward": 1.0, "desc": "Goldplaneten wachsen ×2, ausgebrannte gar nicht."},
 	"hill": {"label": "Hügel", "reward": 1.2, "desc": "Halte den Planeten in der Mitte 60 s, dann gewinnst du."},
+	"custom": {"label": "Eigene", "reward": 0.5, "desc": "Eigene Level aus dem Editor."},
 }
+const LEVELS_PATH := "user://levels.json"
+const ED_TOP := 140.0            # Editor: oben Platz für die Leiste
+const ED_BOTTOM := 232.0         # Editor: unten Platz für das Werkzeugfeld
+const ED_GAP := 6.0
+const ED_MAX_PLANETS := 40
+const ED_MAX_LEVELS := 20
 const RUSH_CIRCLES := 26
 const RUSH_START := 10.0
 const RUSH_GROWTH := 1.8
@@ -133,6 +140,16 @@ const REWARD_REF_CIRCLES := 12.0   # Bezugsgröße für die Kreisanzahl
 var difficulty := 2
 var circle_count := 12
 var level_type := "classic"
+var custom_levels: Array = []  # [{name, circles: [[x, y, value, owner, kind], ...]}], Koordinaten 0..1
+var selected_custom := 0
+var ed_circles: Array = []     # Editor: Planeten in Bildschirmkoordinaten
+var ed_sel := -1
+var ed_drag := -1
+var ed_slot := -1              # Index des gerade bearbeiteten gespeicherten Levels (-1 = neu)
+var ed_testing := false
+var ed_test_level: Dictionary = {}
+var ed_prev_type := "classic"
+var name_edit: LineEdit = null
 var hill_owner := 0            # wer den Hügel gerade hält (lokale Seite)
 var hill_time := 0.0           # wie lange schon, in Sekunden
 var dev_mode := false
@@ -219,6 +236,13 @@ func _ready() -> void:
 	ip_edit.add_theme_font_size_override("font_size", 28)
 	ip_edit.visible = false
 	add_child(ip_edit)
+	name_edit = LineEdit.new()
+	name_edit.placeholder_text = "Levelname"
+	name_edit.max_length = 24
+	name_edit.add_theme_font_size_override("font_size", 26)
+	name_edit.visible = false
+	add_child(name_edit)
+	_load_levels()
 	_load_settings()
 	_setup_audio()
 	ip_edit.text = last_ip
@@ -255,6 +279,7 @@ func _load_settings() -> void:
 	last_ip = str(cfg.get_value("net", "ip", ""))
 	var lt := str(cfg.get_value("game", "level_type", "classic"))
 	level_type = lt if LEVEL_TYPES.has(lt) else "classic"
+	selected_custom = maxi(0, int(cfg.get_value("game", "custom_index", 0)))
 	music_on = bool(cfg.get_value("audio", "music", true))
 	sfx_on = bool(cfg.get_value("audio", "sfx", true))
 	coins = maxi(0, int(cfg.get_value("progress", "coins", 0)))
@@ -278,6 +303,7 @@ func _save_settings() -> void:
 	cfg.set_value("game", "type", selected_type)
 	cfg.set_value("net", "ip", last_ip)
 	cfg.set_value("game", "level_type", level_type)
+	cfg.set_value("game", "custom_index", selected_custom)
 	cfg.set_value("audio", "music", music_on)
 	cfg.set_value("audio", "sfx", sfx_on)
 	cfg.set_value("progress", "coins", coins)
@@ -370,7 +396,7 @@ func _reward_for(won: bool) -> int:
 	var base: float = REWARDS[difficulty]
 	if not won:
 		base *= LOSS_FACTOR
-	base *= float(circle_count) / REWARD_REF_CIRCLES
+	base *= float(circles.size() if level_type == "custom" else circle_count) / REWARD_REF_CIRCLES
 	base *= float(LEVEL_TYPES[level_type]["reward"])
 	if enemy_levels_up:
 		base *= ENEMY_LEVEL_BONUS
@@ -379,6 +405,9 @@ func _reward_for(won: bool) -> int:
 
 func _pay_reward() -> void:
 	reward_paid = true
+	if ed_testing:
+		reward = 0
+		return
 	reward = _reward_for(winner == 1)
 	coins += reward
 	_save_settings()
@@ -426,6 +455,13 @@ func start_game() -> void:
 
 
 func _place_circles() -> void:
+	if level_type == "custom":
+		var lv := _current_custom()
+		if not lv.is_empty():
+			for arr in lv["circles"]:
+				circles.append(_make_circle(Vector2(float(arr[0]) * map_size.x, float(arr[1]) * map_size.y),
+					float(arr[2]), int(arr[3]), int(arr[4])))
+			return
 	var start_y := TOP_MARGIN + 40.0
 	var count := circle_count
 	var vmin := 5
@@ -596,14 +632,24 @@ func _shop_rows() -> Array:
 	return rows
 
 
-# Vier Knöpfe zur Wahl der Levelart
+# Kreisanzahl (- / +), bei "Eigene" stattdessen Levelwahl (< / >)
+func _count_buttons(cx: float, bw: float, y: float) -> Array:
+	if level_type == "custom":
+		var has := custom_levels.size() > 1
+		return [_btn("cl_prev", Rect2(cx - bw * 0.5, y, 110.0, 70.0), "<", 34, [], has),
+			_btn("cl_next", Rect2(cx + bw * 0.5 - 110.0, y, 110.0, 70.0), ">", 34, [], has)]
+	return [_btn("minus", Rect2(cx - bw * 0.5, y, 110.0, 70.0), "-", 34, [], level_type != "rush"),
+		_btn("plus", Rect2(cx + bw * 0.5 - 110.0, y, 110.0, 70.0), "+", 34, [], level_type != "rush")]
+
+
+# Knöpfe zur Wahl der Levelart
 func _level_type_buttons(cx: float, bw: float, y: float) -> Array:
 	var out := []
-	var w := (bw - 30.0) / 4.0
+	var w := (bw - 40.0) / 5.0
 	for i in LEVEL_TYPE_IDS.size():
 		var id: String = LEVEL_TYPE_IDS[i]
 		out.append(_btn("lt_" + id, Rect2(cx - bw * 0.5 + i * (w + 10.0), y, w, 70.0),
-			LEVEL_TYPES[id]["label"], 22))
+			LEVEL_TYPES[id]["label"], 20))
 	return out
 
 
@@ -616,15 +662,17 @@ func _buttons() -> Array:
 	match state:
 		State.MAIN:
 			if has_game():
-				list.append(_btn("resume", Rect2(cx - bw * 0.5, off + 390.0, bw, 120.0), "Fortfahren", 42,
+				list.append(_btn("resume", Rect2(cx - bw * 0.5, off + 370.0, bw, 100.0), "Fortfahren", 38,
 					["laufende Partie"]))
-				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 530.0, bw, 100.0), "Neues Spiel", 34))
-				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 650.0, bw, 100.0), "Werkstatt", 34))
-				list.append(_btn("go_multi", Rect2(cx - bw * 0.5, off + 770.0, bw, 100.0), "Mehrspieler (WLAN)", 30))
+				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 480.0, bw, 90.0), "Neues Spiel", 32))
+				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 580.0, bw, 80.0), "Werkstatt", 30))
+				list.append(_btn("go_multi", Rect2(cx - bw * 0.5, off + 670.0, bw, 80.0), "Mehrspieler (WLAN)", 28))
+				list.append(_btn("go_editor", Rect2(cx - bw * 0.5, off + 760.0, bw, 80.0), "Level-Editor", 28))
 			else:
-				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 400.0, bw, 130.0), "Spielen", 44))
-				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 560.0, bw, 110.0), "Werkstatt", 38))
-				list.append(_btn("go_multi", Rect2(cx - bw * 0.5, off + 690.0, bw, 100.0), "Mehrspieler (WLAN)", 30))
+				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 380.0, bw, 110.0), "Spielen", 42))
+				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 500.0, bw, 90.0), "Werkstatt", 32))
+				list.append(_btn("go_multi", Rect2(cx - bw * 0.5, off + 600.0, bw, 90.0), "Mehrspieler (WLAN)", 30))
+				list.append(_btn("go_editor", Rect2(cx - bw * 0.5, off + 700.0, bw, 90.0), "Level-Editor", 30))
 			var hw := (bw - 10.0) * 0.5
 			list.append(_btn("toggle_music", Rect2(cx - bw * 0.5, off + 910.0, hw, 70.0),
 				"Musik: " + ("An" if music_on else "Aus"), 24))
@@ -645,8 +693,7 @@ func _buttons() -> Array:
 					LEVELS[i]["label"], 26, ["Gegner: " + LEVELS[i]["name"]]))
 			list.append_array(_level_type_buttons(cx, bw, off + 618.0))
 			var row_y := off + 750.0
-			list.append(_btn("minus", Rect2(cx - bw * 0.5, row_y, 110.0, 70.0), "-", 34, [], level_type != "rush"))
-			list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, row_y, 110.0, 70.0), "+", 34, [], level_type != "rush"))
+			list.append_array(_count_buttons(cx, bw, row_y))
 			var tw := (bw - 20.0) / 3.0
 			for i in TYPE_IDS.size():
 				var tid: String = TYPE_IDS[i]
@@ -662,6 +709,30 @@ func _buttons() -> Array:
 				"Gegner levelt mit: " + ("An" if enemy_levels_up else "Aus"), 24,
 				["Gegner bekommt deine Verstärkungen, Münzen ×1,5"]))
 			list.append(_btn("start", Rect2(cx - bw * 0.5, off + 1048.0, bw, 100.0), "Spiel starten", 34))
+		State.EDITOR:
+			var sel_ok := ed_sel >= 0 and ed_sel < ed_circles.size()
+			list.append(_btn("ed_back", Rect2(20.0, 8.0, 150.0, 56.0), "Zurück", 26))
+			var tw4 := (map_size.x - 50.0) / 4.0
+			var tops := [["ed_test", "Test"], ["ed_save", "Speichern"], ["ed_new", "Neu"], ["ed_load", "Laden ▶"]]
+			for k in tops.size():
+				list.append(_btn(tops[k][0], Rect2(10.0 + k * (tw4 + 10.0), 72.0, tw4, 56.0), tops[k][1], 22))
+			var py := map_size.y - ED_BOTTOM + 8.0
+			var w3 := (map_size.x - 40.0) / 3.0
+			var o_txt := "Neutral"
+			var k_txt := "Normal"
+			if sel_ok:
+				o_txt = ["Neutral", "Du", "Gegner"][int(ed_circles[ed_sel]["owner"])]
+				k_txt = ["Normal", "Gold ×2", "Ausgebrannt", "Hügel"][int(ed_circles[ed_sel]["kind"])]
+			list.append(_btn("ed_owner", Rect2(10.0, py, w3, 62.0), "Besitzer: " + o_txt, 20, [], sel_ok))
+			list.append(_btn("ed_kind", Rect2(20.0 + w3, py, w3, 62.0), "Art: " + k_txt, 20, [], sel_ok))
+			list.append(_btn("ed_del", Rect2(30.0 + 2.0 * w3, py, w3, 62.0), "Planet löschen", 20, [], sel_ok))
+			var w5 := (map_size.x - 60.0) / 5.0
+			var steps := [["ed_m5", "-5"], ["ed_m1", "-1"], ["", ""], ["ed_p1", "+1"], ["ed_p5", "+5"]]
+			for k in steps.size():
+				if steps[k][0] != "":
+					list.append(_btn(steps[k][0], Rect2(10.0 + k * (w5 + 10.0), py + 68.0, w5, 62.0), steps[k][1], 26, [], sel_ok))
+			list.append(_btn("ed_dellevel", Rect2(10.0, py + 136.0, map_size.x - 20.0, 58.0),
+				"Gespeichertes Level löschen", 20, [], ed_slot >= 0))
 		State.WORKSHOP:
 			list.append(_btn("back", Rect2(20.0, off + 16.0, 150.0, 56.0), "Zurück", 26))
 			for row in _workshop_rows():
@@ -678,8 +749,7 @@ func _buttons() -> Array:
 						"Beitreten: " + str(ips[i]), 26))
 				list.append(_btn("mp_connect", Rect2(cx - bw * 0.5, off + 825.0, bw, 90.0), "Verbinden", 30))
 			elif mp_status == "hosting":
-				list.append(_btn("minus", Rect2(cx - bw * 0.5, off + 520.0, 110.0, 70.0), "-", 34, [], level_type != "rush"))
-				list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, off + 520.0, 110.0, 70.0), "+", 34, [], level_type != "rush"))
+				list.append_array(_count_buttons(cx, bw, off + 520.0))
 				list.append_array(_level_type_buttons(cx, bw, off + 650.0))
 		State.PLAYING:
 			if game_over:
@@ -756,6 +826,54 @@ func _activate(id: String) -> void:
 			state = State.SETUP
 		"go_workshop":
 			state = State.WORKSHOP
+		"go_editor":
+			state = State.EDITOR
+			if ed_circles.is_empty() and ed_slot < 0:
+				_ed_new()
+		"ed_back":
+			state = State.MAIN
+			_update_size()
+		"ed_test":
+			_ed_test()
+		"ed_save":
+			_ed_save()
+		"ed_new":
+			_ed_new()
+		"ed_load":
+			_ed_load_next()
+		"ed_owner":
+			if ed_sel >= 0:
+				ed_circles[ed_sel]["owner"] = (int(ed_circles[ed_sel]["owner"]) + 1) % 3
+		"ed_kind":
+			if ed_sel >= 0:
+				var nk := (int(ed_circles[ed_sel]["kind"]) + 1) % 4
+				if nk == KIND_HILL:
+					for c in ed_circles:
+						if int(c["kind"]) == KIND_HILL:
+							c["kind"] = KIND_NORMAL
+				ed_circles[ed_sel]["kind"] = nk
+		"ed_del":
+			if ed_sel >= 0:
+				ed_circles.remove_at(ed_sel)
+				ed_sel = -1
+		"ed_m5":
+			_ed_change_value(-5.0)
+		"ed_m1":
+			_ed_change_value(-1.0)
+		"ed_p1":
+			_ed_change_value(1.0)
+		"ed_p5":
+			_ed_change_value(5.0)
+		"ed_dellevel":
+			_ed_delete_level()
+		"cl_prev":
+			if custom_levels.size() > 0:
+				selected_custom = (selected_custom - 1 + custom_levels.size()) % custom_levels.size()
+				_save_settings()
+		"cl_next":
+			if custom_levels.size() > 0:
+				selected_custom = (selected_custom + 1) % custom_levels.size()
+				_save_settings()
 		"go_multi":
 			state = State.MULTI
 			_mp_close()
@@ -770,6 +888,10 @@ func _activate(id: String) -> void:
 		"back":
 			state = State.MAIN
 		"start":
+			if level_type == "custom" and custom_levels.is_empty():
+				toast = "Erst im Level-Editor ein Level bauen"
+				toast_time = 3.0
+				return
 			_save_settings()
 			start_game()
 		"minus":
@@ -802,6 +924,9 @@ func _activate(id: String) -> void:
 			paused = false
 			dev_open = false
 		"menu", "tomenu":
+			if ed_testing:
+				_ed_end_test()
+				return
 			if mp_role != "":
 				_mp_leave()
 				return
@@ -918,9 +1043,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			_on_press(event.position)
 		else:
 			_on_release(event.position)
-	elif event is InputEventMouseMotion and drag_active:
-		drag_pos = event.position
-		queue_redraw()
+	elif event is InputEventMouseMotion:
+		if state == State.EDITOR:
+			_ed_motion(event.position)
+		elif drag_active:
+			drag_pos = event.position
+			queue_redraw()
 
 
 # Titel im Hauptmenü (Tippfläche für den Developer-Geheimcode)
@@ -955,6 +1083,11 @@ func _on_press(pos: Vector2) -> void:
 	if state == State.MULTI:
 		if ip_edit != null:
 			ip_edit.release_focus()
+		return
+	if state == State.EDITOR:
+		if name_edit != null:
+			name_edit.release_focus()
+		_ed_press(pos)
 		return
 	if state == State.MAIN:
 		if _title_rect().has_point(pos):
@@ -1010,6 +1143,9 @@ func _on_release(pos: Vector2) -> void:
 		return
 
 	drag_active = false
+	if state == State.EDITOR:
+		ed_drag = -1
+		return
 	if state != State.PLAYING or game_over:
 		mass_active = false
 		return
@@ -1381,7 +1517,7 @@ func _rate(c: Dictionary) -> float:
 
 # König des Hügels: Wer den Hügel durchgehend hält, gewinnt nach HILL_GOAL Sekunden
 func _hill_tick(delta: float) -> void:
-	if level_type != "hill":
+	if level_type != "hill" and level_type != "custom":
 		return
 	var idx := -1
 	for i in circles.size():
@@ -1543,6 +1679,260 @@ func _ai_buy(own: Array) -> void:
 			if int(c[kind]) < UP_MAX and c["value"] - float(_up_cost(c, kind)) >= AI_KEEP:
 				if _shop_buy(2, i, kind):
 					return
+
+
+# ---------- Level-Editor ----------
+
+func _load_levels() -> void:
+	custom_levels.clear()
+	if not FileAccess.file_exists(LEVELS_PATH):
+		return
+	var f := FileAccess.open(LEVELS_PATH, FileAccess.READ)
+	if f == null:
+		return
+	var data = JSON.parse_string(f.get_as_text())
+	if data is Array:
+		for lv in data:
+			if lv is Dictionary and lv.has("name") and lv.has("circles") and lv["circles"] is Array:
+				custom_levels.append(lv)
+
+
+func _save_levels() -> void:
+	var f := FileAccess.open(LEVELS_PATH, FileAccess.WRITE)
+	if f != null:
+		f.store_string(JSON.stringify(custom_levels))
+
+
+func _current_custom() -> Dictionary:
+	if ed_testing:
+		return ed_test_level
+	if selected_custom >= 0 and selected_custom < custom_levels.size():
+		return custom_levels[selected_custom]
+	return {}
+
+
+func _custom_label() -> String:
+	if custom_levels.is_empty():
+		return "Noch keins (Editor)"
+	selected_custom = clampi(selected_custom, 0, custom_levels.size() - 1)
+	return "%s (%d/%d)" % [custom_levels[selected_custom]["name"], selected_custom + 1, custom_levels.size()]
+
+
+func _ed_toast(msg: String) -> void:
+	toast = msg
+	toast_time = 3.0
+
+
+func _ed_new() -> void:
+	ed_circles.clear()
+	ed_sel = -1
+	ed_slot = -1
+	if name_edit != null:
+		name_edit.text = "Level %d" % (custom_levels.size() + 1)
+
+
+func _ed_hit_radius(c: Dictionary) -> float:
+	return maxf(float(c["radius"]) + 8.0, 40.0)
+
+
+func _ed_planet_at(pos: Vector2) -> int:
+	var best := -1
+	var best_d := INF
+	for i in ed_circles.size():
+		var d: float = pos.distance_to(ed_circles[i]["pos"])
+		if d <= _ed_hit_radius(ed_circles[i]) and d < best_d:
+			best = i
+			best_d = d
+	return best
+
+
+# Passt ein Planet mit diesem Radius an diese Stelle (Rand, Leisten, Abstand zu den anderen)?
+func _ed_fits(pos: Vector2, radius: float, ignore: int) -> bool:
+	if pos.x < radius + 8.0 or pos.x > map_size.x - radius - 8.0:
+		return false
+	if pos.y < ED_TOP + radius or pos.y > map_size.y - ED_BOTTOM - radius:
+		return false
+	for i in ed_circles.size():
+		if i == ignore:
+			continue
+		if pos.distance_to(ed_circles[i]["pos"]) < radius + float(ed_circles[i]["radius"]) + ED_GAP:
+			return false
+	return true
+
+
+func _ed_press(pos: Vector2) -> void:
+	var hit := _ed_planet_at(pos)
+	if hit >= 0:
+		ed_sel = hit
+		ed_drag = hit
+		return
+	ed_drag = -1
+	var in_area := pos.y >= ED_TOP and pos.y <= map_size.y - ED_BOTTOM
+	if not in_area:
+		return
+	if ed_circles.size() >= ED_MAX_PLANETS:
+		_ed_toast("Höchstens %d Planeten" % ED_MAX_PLANETS)
+		return
+	var value := 10.0
+	var radius := _radius_for(value)
+	if not _ed_fits(pos, radius, -1):
+		_ed_toast("Kein Platz für einen Planeten")
+		return
+	ed_circles.append({"pos": pos, "value": value, "owner": 0, "kind": KIND_NORMAL, "radius": radius})
+	ed_sel = ed_circles.size() - 1
+	queue_redraw()
+
+
+func _ed_motion(pos: Vector2) -> void:
+	if ed_drag < 0 or ed_drag >= ed_circles.size():
+		return
+	var r: float = ed_circles[ed_drag]["radius"]
+	var p := Vector2(clampf(pos.x, r + 8.0, map_size.x - r - 8.0),
+		clampf(pos.y, ED_TOP + r, map_size.y - ED_BOTTOM - r))
+	if _ed_fits(p, r, ed_drag):
+		ed_circles[ed_drag]["pos"] = p
+	queue_redraw()
+
+
+func _ed_change_value(delta: float) -> void:
+	if ed_sel < 0 or ed_sel >= ed_circles.size():
+		return
+	var c: Dictionary = ed_circles[ed_sel]
+	var v := clampf(float(c["value"]) + delta, 1.0, 40.0)
+	var r := _radius_for(v)
+	if delta > 0.0 and not _ed_fits(c["pos"], r, ed_sel):
+		_ed_toast("Kein Platz zum Vergrößern")
+		return
+	c["value"] = v
+	c["radius"] = r
+
+
+# Editor-Karte -> speicherbares Level (Koordinaten 0..1)
+func _ed_to_level() -> Dictionary:
+	var arr := []
+	for c in ed_circles:
+		arr.append([snappedf(c["pos"].x / map_size.x, 0.0001), snappedf(c["pos"].y / map_size.y, 0.0001),
+			float(c["value"]), int(c["owner"]), int(c["kind"])])
+	var lname := name_edit.text.strip_edges() if name_edit != null else ""
+	if lname == "":
+		lname = "Level %d" % (custom_levels.size() + 1)
+	return {"name": lname, "circles": arr}
+
+
+func _ed_load_level(lv: Dictionary) -> void:
+	ed_circles.clear()
+	for a in lv["circles"]:
+		var v := float(a[2])
+		ed_circles.append({"pos": Vector2(float(a[0]) * map_size.x, float(a[1]) * map_size.y),
+			"value": v, "owner": int(a[3]), "kind": int(a[4]), "radius": _radius_for(v)})
+	ed_sel = -1
+	if name_edit != null:
+		name_edit.text = str(lv["name"])
+
+
+# Gültig, wenn beide Seiten mindestens einen Planeten haben
+func _ed_valid() -> bool:
+	var mine := 0
+	var theirs := 0
+	for c in ed_circles:
+		if c["owner"] == 1:
+			mine += 1
+		elif c["owner"] == 2:
+			theirs += 1
+	if mine == 0 or theirs == 0:
+		_ed_toast("Du und der Gegner brauchen je mindestens einen Planeten")
+		return false
+	return true
+
+
+func _ed_save() -> void:
+	if not _ed_valid():
+		return
+	var lv := _ed_to_level()
+	if ed_slot >= 0 and ed_slot < custom_levels.size():
+		custom_levels[ed_slot] = lv
+	else:
+		if custom_levels.size() >= ED_MAX_LEVELS:
+			_ed_toast("Höchstens %d Level – erst eins löschen" % ED_MAX_LEVELS)
+			return
+		custom_levels.append(lv)
+		ed_slot = custom_levels.size() - 1
+	selected_custom = ed_slot
+	_save_levels()
+	_save_settings()
+	_ed_toast("Gespeichert: " + str(lv["name"]))
+
+
+func _ed_load_next() -> void:
+	if custom_levels.is_empty():
+		_ed_toast("Noch keine gespeicherten Level")
+		return
+	ed_slot = (ed_slot + 1) % custom_levels.size()
+	_ed_load_level(custom_levels[ed_slot])
+	_ed_toast("Geladen: " + str(custom_levels[ed_slot]["name"]))
+
+
+func _ed_delete_level() -> void:
+	if ed_slot < 0 or ed_slot >= custom_levels.size():
+		return
+	var lname := str(custom_levels[ed_slot]["name"])
+	custom_levels.remove_at(ed_slot)
+	selected_custom = clampi(selected_custom, 0, maxi(custom_levels.size() - 1, 0))
+	_save_levels()
+	_save_settings()
+	_ed_new()
+	_ed_toast("Gelöscht: " + lname)
+
+
+# Probespiel direkt aus dem Editor (ohne Münzen); Menü führt zurück in den Editor
+func _ed_test() -> void:
+	if not _ed_valid():
+		return
+	ed_test_level = _ed_to_level()
+	ed_testing = true
+	ed_prev_type = level_type
+	level_type = "custom"
+	start_game()
+
+
+func _ed_end_test() -> void:
+	ed_testing = false
+	level_type = ed_prev_type
+	circles.clear()
+	armies.clear()
+	game_over = false
+	drag_active = false
+	selected = -1
+	paused = false
+	fx.clear()
+	state = State.EDITOR
+
+
+func _draw_editor(font: Font) -> void:
+	# Spielfläche markieren
+	draw_rect(Rect2(6.0, ED_TOP, map_size.x - 12.0, map_size.y - ED_BOTTOM - ED_TOP), Color(1, 1, 1, 0.03), true)
+	draw_rect(Rect2(6.0, ED_TOP, map_size.x - 12.0, map_size.y - ED_BOTTOM - ED_TOP), Color(1, 1, 1, 0.15), false, 2.0)
+	if ed_circles.is_empty():
+		_text(font, map_size.y * 0.45, "Tippe auf die Karte,", 28, Color(1, 1, 1, 0.6))
+		_text(font, map_size.y * 0.45 + 38.0, "um einen Planeten zu setzen", 28, Color(1, 1, 1, 0.6))
+	for i in ed_circles.size():
+		var c: Dictionary = ed_circles[i]
+		draw_circle(c["pos"], c["radius"], COLORS[c["owner"]])
+		_draw_kind(font, c)
+		if i == ed_sel:
+			draw_arc(c["pos"], c["radius"] + 8.0, 0.0, TAU, 48, Color.WHITE, 3.0)
+		draw_string(font, c["pos"] + Vector2(-c["radius"], 10.0), str(int(c["value"])),
+			HORIZONTAL_ALIGNMENT_CENTER, c["radius"] * 2.0, 28, Color.WHITE)
+	# Werkzeugfeld
+	draw_rect(Rect2(0.0, map_size.y - ED_BOTTOM, map_size.x, ED_BOTTOM), Color(0, 0, 0, 0.55), true)
+	if ed_sel >= 0 and ed_sel < ed_circles.size():
+		var w5 := (map_size.x - 60.0) / 5.0
+		var py := map_size.y - ED_BOTTOM + 8.0 + 68.0
+		draw_string(font, Vector2(10.0 + 2.0 * (w5 + 10.0), py + 40.0), "Armee %d" % int(ed_circles[ed_sel]["value"]),
+			HORIZONTAL_ALIGNMENT_CENTER, w5, 22, GOLD)
+	if toast_time > 0.0:
+		_text(font, ED_TOP - 8.0, toast, 20, GOLD)
+	_draw_buttons(font)
 
 
 # ---------- Audio ----------
@@ -1750,6 +2140,8 @@ func _on_server_disconnected() -> void:
 
 # Host: neue Runde starten und dem Client die Karte schicken
 func _mp_start_round() -> void:
+	if level_type == "custom" and custom_levels.is_empty():
+		level_type = "classic"
 	dev_speed_index = 1
 	dev_ai_frozen = false
 	dev_tool = ""
@@ -1982,6 +2374,11 @@ func _mp_process(delta: float) -> void:
 			var bw := minf(map_size.x - 80.0, 600.0)
 			ip_edit.position = Vector2(map_size.x * 0.5 - bw * 0.5, off + 740.0)
 			ip_edit.size = Vector2(bw, 70.0)
+	if name_edit != null:
+		name_edit.visible = state == State.EDITOR
+		if state == State.EDITOR:
+			name_edit.position = Vector2(180.0, 8.0)
+			name_edit.size = Vector2(map_size.x - 190.0, 56.0)
 	# Host: Zustand an den Client schicken, Spielende melden
 	if mp_role == "host" and mp_status == "playing" and state == State.PLAYING:
 		mp_snap_timer -= delta
@@ -2154,6 +2551,8 @@ func _draw() -> void:
 			_draw_game(font)
 		State.MULTI:
 			_draw_multi(font)
+		State.EDITOR:
+			_draw_editor(font)
 
 
 func _draw_buttons(font: Font) -> void:
@@ -2189,9 +2588,13 @@ func _draw_setup(font: Font) -> void:
 	_text(font, off + 570.0, level_info(), 19, Color(1, 1, 1, 0.85))
 	_text(font, off + 606.0, "Levelart", 22, Color(1, 1, 1, 0.7))
 	_text(font, off + 710.0, LEVEL_TYPES[level_type]["desc"], 18, Color(GOLD, 0.9))
-	_text(font, off + 738.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
+	_text(font, off + 738.0, "Anzahl Kreise" if level_type != "custom" else "Eigenes Level", 22, Color(1, 1, 1, 0.7))
 	var count_text := str(circle_count) if level_type != "rush" else "%d (Rush)" % RUSH_CIRCLES
-	_text(font, off + 750.0 + 48.0, count_text, 40, Color.WHITE)
+	if level_type == "custom":
+		count_text = _custom_label()
+	_text(font, off + 750.0 + 48.0, count_text, 40 if level_type != "custom" else 26, Color.WHITE)
+	if toast_time > 0.0:
+		_text(font, off + 1180.0, toast, 22, GOLD)
 	_text(font, off + 850.0, "Armeetyp", 22, Color(1, 1, 1, 0.7))
 
 
@@ -2218,8 +2621,11 @@ func _draw_multi(font: Font) -> void:
 			_text(font, off + 410.0, "Ohne WLAN: mobilen Hotspot einschalten, der andere verbindet sich damit.",
 				18, Color(1, 1, 1, 0.55))
 			_text(font, off + 500.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
-			_text(font, off + 520.0 + 48.0, str(circle_count) if level_type != "rush" else "%d (Rush)" % RUSH_CIRCLES,
-				40, Color.WHITE)
+			if level_type == "custom":
+				_text(font, off + 520.0 + 48.0, _custom_label(), 26, Color.WHITE)
+			else:
+				_text(font, off + 520.0 + 48.0, str(circle_count) if level_type != "rush" else "%d (Rush)" % RUSH_CIRCLES,
+					40, Color.WHITE)
 			_text(font, off + 638.0, "Levelart", 22, Color(1, 1, 1, 0.7))
 			_text(font, off + 742.0, LEVEL_TYPES[level_type]["desc"], 18, Color(GOLD, 0.9))
 			_text(font, off + 800.0, "Beide spielen mit Standard-Armeen, ohne Verstärkungen.",

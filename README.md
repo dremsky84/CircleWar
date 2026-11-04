@@ -108,3 +108,11 @@ Auswahl im Spielen-Menü (und beim Host im Mehrspieler-Lobby):
 - **Rohstoff:** 2 Goldplaneten (Wachstum ×2) und 3 ausgebrannte (Wachstum ×0) unter den neutralen. Die KI bevorzugt Gold.
 - **Hügel:** Planet in der Mitte mit Stern; wer ihn 60 s durchgehend hält, gewinnt (Zähler am Planeten, Besitzerwechsel setzt zurück). Münzen ×1,2.
 - Simulation: `ltype=classic|rush|resource|hill`.
+
+## Level-Editor
+
+- Hauptmenü → **Level-Editor**. Auf die Karte tippen setzt einen Planeten, antippen wählt ihn aus, ziehen verschiebt ihn.
+- Unten pro Planet: **Besitzer** (Neutral/Du/Gegner), **Art** (Normal, Gold ×2, Ausgebrannt, Hügel – nur ein Hügel), **Armee** (±1/±5; die Größe folgt der Armee), Planet löschen.
+- Oben: **Test** (Probespiel ohne Münzen, "Menü" führt zurück in den Editor), **Speichern**, **Neu**, **Laden ▶** (blättert durch gespeicherte Level), Levelname editierbar. Gültig sind Level, in denen Du und der Gegner je mindestens einen Planeten haben (bis 40 Planeten, bis 20 Level).
+- Gespeichert wird in `user://levels.json` (Koordinaten relativ 0..1, passen auf andere Bildschirmformate). Spielen: Levelart **Eigene**, mit < > das Level wählen. Münzen ×0,5.
+- Im Mehrspieler funktionieren eigene Level, weil der Host die Karte an den Mitspieler schickt. Liegt ein Hügel auf der Karte, gelten die Hügel-Regeln.

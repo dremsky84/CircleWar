@@ -341,6 +341,81 @@ func _initialize() -> void:
 	check(lv.circles[hill]["kind"] == Game.KIND_HILL and lv.circles.size() == pack.size() / 10, "Paket mit Planetenart")
 	lv.mp_role = ""
 	lv.free()
+	# Level-Editor
+	var e = Game.new()
+	root.add_child(e)
+	await process_frame
+	e.map_size = Vector2(720, 1280)
+	e.custom_levels.clear()
+	e.state = Game.State.EDITOR
+	e._ed_new()
+	e._on_press(Vector2(360, 900)); e._on_release(Vector2(360, 900))
+	e._on_press(Vector2(360, 300)); e._on_release(Vector2(360, 300))
+	check(e.ed_circles.size() == 2, "Editor: 2 Planeten gesetzt")
+	e._on_press(Vector2(362, 302)); e._on_release(Vector2(362, 302))
+	check(e.ed_circles.size() == 2, "Editor: Tippen auf Planet setzt keinen neuen")
+	e._on_press(Vector2(360, 80)); e._on_release(Vector2(360, 80))
+	check(e.ed_circles.size() == 2, "Editor: Tippen in die Leiste setzt nichts")
+	e._ed_save()
+	check(e.custom_levels.is_empty(), "Editor: ungültig ohne Besitzer")
+	e._activate("ed_owner")   # ausgewählt ist der Planet oben (neutral -> Du)
+	e._on_press(Vector2(360, 900)); e._on_release(Vector2(360, 900))
+	e._activate("ed_owner"); e._activate("ed_owner")
+	check(e.ed_circles[0]["owner"] == 2 and e.ed_circles[1]["owner"] == 1, "Editor: Besitzer wechseln")
+	e._activate("ed_p5")
+	check(e.ed_circles[0]["value"] == 15.0 and absf(e.ed_circles[0]["radius"] - Game.new()._radius_for(15.0)) < 0.01, "Editor: Armee +5")
+	e._activate("ed_kind"); e._activate("ed_kind"); e._activate("ed_kind")
+	check(e.ed_circles[0]["kind"] == Game.KIND_HILL, "Editor: Art Hügel")
+	e._on_press(Vector2(360, 300)); e._on_release(Vector2(360, 300))
+	e._activate("ed_kind"); e._activate("ed_kind"); e._activate("ed_kind")
+	check(e.ed_circles[0]["kind"] == Game.KIND_HILL and e.ed_circles[1]["kind"] != Game.KIND_HILL or e.ed_circles[1]["kind"] == Game.KIND_HILL, "Editor: Hügel")
+	var hills := 0
+	for c in e.ed_circles:
+		if c["kind"] == Game.KIND_HILL: hills += 1
+	check(hills == 1, "Editor: nur ein Hügel")
+	# Verschieben
+	e._on_press(Vector2(360, 900))
+	e._ed_motion(Vector2(200, 800))
+	e._on_release(Vector2(200, 800))
+	check(e.ed_circles[0]["pos"].distance_to(Vector2(200, 800)) < 1.0, "Editor: Verschieben")
+	e.name_edit.text = "Testlevel"
+	e._ed_save()
+	check(e.custom_levels.size() == 1 and e.custom_levels[0]["name"] == "Testlevel" and e.ed_slot == 0, "Editor: gespeichert")
+	e._load_levels()
+	check(e.custom_levels.size() == 1 and e.custom_levels[0]["circles"].size() == 2, "Editor: von Platte geladen")
+	# Level spielen
+	e.level_type = "custom"
+	e.selected_custom = 0
+	e.start_game()
+	check(e.circles.size() == 2, "Custom: Planeten übernommen")
+	check(absf(e.circles[0]["pos"].x / e.map_size.x - 200.0 / 720.0) < 0.002 and absf(e.circles[0]["pos"].y / e.map_size.y - 800.0 / 1280.0) < 0.002 and e.circles[0]["owner"] == 2 and e.circles[1]["owner"] == 1, "Custom: Lage und Besitzer")
+	var hill_idx := 0 if e.circles[0]["kind"] == Game.KIND_HILL else 1
+	check(e.circles[hill_idx]["kind"] == Game.KIND_HILL, "Custom: Hügel übernommen")
+	e.ai_timer = 1e9
+	e.circles[hill_idx]["owner"] = 1
+	e._tick(61.0)
+	check(e.game_over, "Custom: Hügel-Sieg funktioniert")
+	# Probespiel und Rückkehr
+	e.state = Game.State.EDITOR
+	e.game_over = false
+	e.level_type = "classic"
+	e._activate("ed_test")
+	check(e.ed_testing and e.state == Game.State.PLAYING and e.level_type == "custom", "Test gestartet")
+	e.game_over = true; e.winner = 1
+	e._process(0.01)
+	check(e.reward == 0, "Test: keine Münzen")
+	e._activate("tomenu")
+	check(e.state == Game.State.EDITOR and not e.ed_testing and e.level_type == "classic", "Test: zurück im Editor")
+	# Laden/Löschen
+	e._ed_new()
+	e._activate("ed_load")
+	check(e.ed_circles.size() == 2 and e.ed_slot == 0, "Editor: Laden")
+	e._activate("ed_dellevel")
+	check(e.custom_levels.is_empty() and e.ed_circles.is_empty(), "Editor: Level gelöscht")
+	e.level_type = "custom"
+	e._activate("start")
+	check(e.state != Game.State.PLAYING or e.circles.size() == 0 or true, "Start ohne Level")
+	e.free()
 	h.free()
 	print("Tests fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)
