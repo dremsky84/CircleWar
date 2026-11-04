@@ -1,4 +1,4 @@
-# CircleWar
+# Circle-Wars
 
 Echtzeit-Strategie mit Kreisen für das Handy (Godot 4.3). Zwei Kontrahenten kämpfen um die Kreise auf der Karte. Die Zahl im Kreis ist die Armee.
 

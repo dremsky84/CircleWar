@@ -1,6 +1,6 @@
 extends Node2D
 
-# CircleWar - Echtzeit-Strategie mit Kreisen
+# Circle-Wars - Echtzeit-Strategie mit Kreisen
 # Hauptmenü -> Spielen (Einstellungen) oder Werkstatt (Verstärkungen, Armeetypen)
 # -> Partie gegen die KI -> Ergebnis mit Münzen
 
@@ -1903,7 +1903,7 @@ func _draw_coins(font: Font, off: float) -> void:
 
 func _draw_main(font: Font) -> void:
 	var off := _menu_offset()
-	_text(font, off + 140.0, "CircleWar", 64, Color.WHITE)
+	_text(font, off + 140.0, "Circle-Wars", 64, Color.WHITE)
 	_text(font, off + 190.0, "Erobere alle Kreise", 26, Color(1, 1, 1, 0.7))
 	_text(font, off + 330.0, "Münzen: %d" % coins, 40, GOLD)
 	_draw_buttons(font)
