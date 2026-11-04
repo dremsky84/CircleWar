@@ -56,3 +56,9 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - Münzen pro Sieg: 20 / 40 / 70 / 110 / 160 (bei 12 Kreisen, skaliert mit der Kreisanzahl), Niederlage 25 %.
 - Speicherstand in `user://settings.cfg`. Developer Mode (Hauptmenü): +1000 Münzen, alles freischalten, Fortschritt zurücksetzen.
 - Tests: `godot --headless --path . -s tools/tests.gd`; Simulation mit `type=tank|star upg=0..10 enemy=1`.
+
+## Pause und Menü
+
+- **Pause** (oben rechts): friert die Partie ein. Im Pause-Menü: Fortfahren, Menü und (Developer Mode) das Developer-Panel.
+- **Menü** aus dem Pause-Menü lässt die Partie bestehen; im Hauptmenü gibt es dann **Fortfahren**.
+- Kämpfe zeigen Blitze, Funken und eine Druckwelle um den Kreis (größer bei Eroberung).

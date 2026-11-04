@@ -117,7 +117,8 @@ var rng := RandomNumberGenerator.new()
 
 # Developer Mode (nur aktiv, wenn im Hauptmenü eingeschaltet)
 var dev_open := false          # Panel sichtbar
-var dev_paused := false
+var paused := false            # Pause-Menü im Spiel
+var fx: Array = []             # Kampfeffekte (Funken/Blitze)
 var dev_speed_index := 1
 var dev_ai_frozen := false
 var dev_info := false
@@ -131,8 +132,13 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_update_size)
 
 
+# Läuft eine Partie (auch wenn man gerade im Hauptmenü ist)?
+func has_game() -> bool:
+	return not circles.is_empty() and not game_over
+
+
 func _update_size() -> void:
-	if is_inside_tree() and state != State.PLAYING:
+	if is_inside_tree() and not has_game():
 		map_size = get_viewport_rect().size
 		queue_redraw()
 
@@ -289,7 +295,8 @@ func start_game() -> void:
 	winner = 0
 	reward = 0
 	reward_paid = false
-	dev_paused = false
+	paused = false
+	fx.clear()
 	level = LEVELS[difficulty]
 	_compute_stats()
 	ai_timer = level["interval"]
@@ -351,8 +358,7 @@ func _dev_buttons() -> Array:
 	var p := _panel_rect()
 	var bw := (map_size.x - 50.0) / 4.0
 	var rows := [
-		[["dev_pause", "Weiter" if dev_paused else "Pause"],
-			["dev_speed", "Tempo x" + SPEED_LABELS[dev_speed_index]],
+		[["dev_speed", "Tempo x" + SPEED_LABELS[dev_speed_index]],
 			["dev_ai", "KI: aus" if dev_ai_frozen else "KI: an"],
 			["dev_info", "Infos: an" if dev_info else "Infos: aus"]],
 		[["dev_map", "Neue Karte"], ["dev_level", "Gegner +"], ["dev_win", "Sieg"], ["dev_lose", "Niederlage"]],
@@ -413,8 +419,14 @@ func _buttons() -> Array:
 	var bw := minf(map_size.x - 80.0, 600.0)
 	match state:
 		State.MAIN:
-			list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 400.0, bw, 130.0), "Spielen", 44))
-			list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 560.0, bw, 110.0), "Werkstatt", 38))
+			if has_game():
+				list.append(_btn("resume", Rect2(cx - bw * 0.5, off + 390.0, bw, 120.0), "Fortfahren", 42,
+					["laufende Partie"]))
+				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 530.0, bw, 100.0), "Neues Spiel", 34))
+				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 650.0, bw, 100.0), "Werkstatt", 34))
+			else:
+				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 400.0, bw, 130.0), "Spielen", 44))
+				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 560.0, bw, 110.0), "Werkstatt", 38))
 			if dev_mode:
 				var w := (bw - 20.0) / 3.0
 				list.append(_btn("dev_coins", Rect2(cx - bw * 0.5, off + 1070.0, w, 70.0), "+1000", 22, ["Münzen"]))
@@ -457,11 +469,17 @@ func _buttons() -> Array:
 				list.append(_btn("again", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 110.0, gw, 90.0), "Nochmal"))
 				list.append(_btn("tomenu", Rect2(cx - gw * 0.5, map_size.y * 0.5 + 220.0, gw, 90.0), "Menü"))
 			else:
-				list.append(_btn("menu", Rect2(map_size.x - 170.0, 16.0, 150.0, 56.0), "Menü"))
-				if dev_mode:
-					list.append(_btn("dev", Rect2(map_size.x - 340.0, 16.0, 150.0, 56.0), "DEV"))
-					if dev_open:
-						list.append_array(_dev_buttons())
+				if paused:
+					var pw := 400.0
+					var py := map_size.y * 0.5 - 130.0
+					list.append(_btn("resume", Rect2(cx - pw * 0.5, py, pw, 100.0), "Fortfahren", 38))
+					list.append(_btn("menu", Rect2(cx - pw * 0.5, py + 120.0, pw, 90.0), "Menü"))
+					if dev_mode:
+						list.append(_btn("dev", Rect2(cx - pw * 0.5, py + 230.0, pw, 80.0), "Developer", 28))
+						if dev_open:
+							list.append_array(_dev_buttons())
+				else:
+					list.append(_btn("pause", Rect2(map_size.x - 170.0, 16.0, 150.0, 56.0), "Pause", 26))
 	return list
 
 
@@ -480,7 +498,6 @@ func _is_active(id: String) -> bool:
 		return id.substr(5) == selected_type
 	match id:
 		"dev": return dev_open
-		"dev_pause": return dev_paused
 		"dev_ai": return dev_ai_frozen
 		"dev_info": return dev_info
 		"dev_toggle": return dev_mode
@@ -512,9 +529,20 @@ func _activate(id: String) -> void:
 			_save_settings()
 		"again":
 			start_game()
+		"pause":
+			paused = true
+			drag_active = false
+			selected = -1
+			hold_target = -1
+			hold_time = 0.0
+		"resume":
+			state = State.PLAYING
+			paused = false
+			dev_open = false
 		"menu", "tomenu":
+			# Eine laufende Partie bleibt erhalten ("Fortfahren" im Hauptmenü)
 			state = State.MAIN
-			game_over = false
+			paused = true
 			drag_active = false
 			selected = -1
 			_update_size()
@@ -539,8 +567,6 @@ func _activate(id: String) -> void:
 			_save_settings()
 		"dev":
 			dev_open = not dev_open
-		"dev_pause":
-			dev_paused = not dev_paused
 		"dev_speed":
 			dev_speed_index = (dev_speed_index + 1) % SPEEDS.size()
 		"dev_ai":
@@ -582,7 +608,6 @@ func _activate(id: String) -> void:
 
 func _reset_dev() -> void:
 	dev_open = false
-	dev_paused = false
 	dev_speed_index = 1
 	dev_ai_frozen = false
 	dev_info = false
@@ -633,10 +658,12 @@ func _on_press(pos: Vector2) -> void:
 		return
 	if state != State.PLAYING or game_over:
 		return
-	if dev_mode and dev_open and _panel_rect().has_point(pos):
+	if paused and dev_mode and dev_open and _panel_rect().has_point(pos):
 		return  # Berührungen auf dem Panel gehen nicht ins Spielfeld durch
 	if dev_mode and dev_tool != "":
 		_apply_dev_tool(_circle_at(pos))
+		return
+	if paused:
 		return
 	drag_active = true
 	drag_pos = pos
@@ -775,11 +802,58 @@ func _resolve(army: Dictionary) -> void:
 		return
 	var atk: float = army["amount"] * _power(owner)
 	var dfn: float = dst["value"] * _power(dst["owner"])
+	_spawn_fx(dst, owner, atk > dfn)
 	if atk > dfn:
 		dst["owner"] = owner
 		dst["value"] = (atk - dfn) / _power(owner)
 	else:
 		dst["value"] = (dfn - atk) / _power(dst["owner"])
+
+
+# Kampfeffekt: Blitze und Funken um den umkämpften Kreis (nicht im Headless-Betrieb)
+func _spawn_fx(dst: Dictionary, attacker: int, conquered: bool) -> void:
+	if DisplayServer.get_name() == "headless" or fx.size() > 60:
+		return
+	var r: float = dst["radius"]
+	var bolts := []
+	var count := 10 if conquered else 7
+	for k in count:
+		var ang := rng.randf() * TAU
+		var length := rng.randf_range(28.0, 46.0) * (1.4 if conquered else 1.0)
+		var pts := PackedVector2Array()
+		var segs := 4
+		for j in segs + 1:
+			var rr := r + 2.0 + length * float(j) / float(segs)
+			var a := ang + (rng.randf_range(-0.14, 0.14) if j > 0 else 0.0)
+			pts.append(Vector2.RIGHT.rotated(a) * rr)
+		bolts.append(pts)
+	fx.append({"pos": dst["pos"], "radius": r, "color": COLORS[attacker], "bolts": bolts,
+		"age": 0.0, "dur": 0.7 if conquered else 0.5, "big": conquered})
+
+
+func _update_fx(delta: float) -> void:
+	for e in fx.duplicate():
+		e["age"] += delta
+		if e["age"] >= e["dur"]:
+			fx.erase(e)
+
+
+func _draw_fx() -> void:
+	for e in fx:
+		var t: float = e["age"] / e["dur"]
+		var a := 1.0 - t
+		var p: Vector2 = e["pos"]
+		var col: Color = e["color"]
+		draw_arc(p, e["radius"] + 4.0 + t * (46.0 if e["big"] else 30.0), 0.0, TAU, 48,
+			Color(col.lightened(0.4), a * 0.7), 4.0 * a + 1.0)
+		var flicker := 1.0 if int(e["age"] * 40.0) % 2 == 0 else 0.6
+		for pts in e["bolts"]:
+			var moved := PackedVector2Array()
+			for q in pts:
+				moved.append(p + q)
+			draw_polyline(moved, Color(col, a * 0.55 * flicker), 11.0)
+			draw_polyline(moved, Color(1.0, 0.96, 0.7, a * flicker), 4.0)
+			draw_circle(moved[moved.size() - 1], 3.0 * a + 1.0, Color(1, 1, 0.8, a))
 
 
 func _check_winner() -> void:
@@ -806,10 +880,12 @@ func _check_winner() -> void:
 func _process(delta: float) -> void:
 	if state == State.PLAYING and game_over and not reward_paid:
 		_pay_reward()
-	if state == State.PLAYING and not game_over:
+	var running := state == State.PLAYING and not game_over and not paused
+	if running:
 		_update_hold(delta)
-	if state == State.PLAYING and not game_over and not dev_paused:
 		_tick(delta * SPEEDS[dev_speed_index])
+	if state == State.PLAYING and not paused:
+		_update_fx(delta)
 	queue_redraw()
 
 
@@ -984,7 +1060,7 @@ func _draw() -> void:
 func _draw_buttons(font: Font) -> void:
 	for b in _buttons():
 		var id: String = b["id"]
-		_draw_button(font, b, _is_active(id), id == press_button, id == "start" or id == "go_setup")
+		_draw_button(font, b, _is_active(id), id == press_button, id == "start" or id == "resume" or (id == "go_setup" and not has_game()))
 
 
 func _draw_coins(font: Font, off: float) -> void:
@@ -1088,6 +1164,7 @@ func _draw_game(font: Font) -> void:
 
 	for a in armies:
 		_draw_army(font, a)
+	_draw_fx()
 
 	if drag_active and selected >= 0:
 		var end := drag_pos
@@ -1128,11 +1205,14 @@ func _draw_game(font: Font) -> void:
 		_draw_dev_overlay(font)
 
 	if not game_over:
-		if dev_mode and dev_open:
-			draw_rect(_panel_rect(), Color(0, 0, 0, 0.78), true)
+		if paused:
+			draw_rect(Rect2(Vector2.ZERO, map_size), Color(0, 0, 0, 0.55), true)
+			_text(font, map_size.y * 0.5 - 170.0, "Pause", 56, Color.WHITE)
+			if dev_mode and dev_open:
+				draw_rect(_panel_rect(), Color(0, 0, 0, 0.78), true)
 		for b in _buttons():
 			var id: String = b["id"]
-			_draw_button(font, b, _is_active(id), id == press_button, false)
+			_draw_button(font, b, _is_active(id), id == press_button, id == "resume")
 
 	if game_over:
 		draw_rect(Rect2(Vector2.ZERO, map_size), Color(0, 0, 0, 0.6), true)
@@ -1164,8 +1244,6 @@ func _draw_dev_overlay(font: Font) -> void:
 		for line in lines:
 			draw_string(font, Vector2(20, y), line, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, GOLD)
 			y += 24.0
-	if dev_paused:
-		_text(font, map_size.y * 0.5, "PAUSE", 56, Color(1, 1, 1, 0.5))
 
 
 func dev_tool_label() -> String:

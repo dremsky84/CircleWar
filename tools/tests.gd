@@ -65,6 +65,32 @@ func _initialize() -> void:
 	for st in [Game.State.MAIN, Game.State.SETUP, Game.State.WORKSHOP]:
 		h.state = st
 		check(h._buttons().size() > 0, "Buttons %d" % st)
+	# Pause / Menü / Fortfahren
+	g.start_game()
+	check(g.has_game() and not g.paused, "Spiel läuft")
+	g._activate("pause")
+	check(g.paused, "pausiert")
+	var v: float = g.circles[0]["value"]
+	g._process(1.0)
+	check(g.circles[0]["value"] == v, "Pause friert ein")
+	g._activate("menu")
+	check(g.state == Game.State.MAIN and g.has_game(), "Menü, Spiel bleibt")
+	var ids := []
+	for b in g._buttons():
+		ids.append(b["id"])
+	check("resume" in ids, "Fortfahren im Menü")
+	g._activate("resume")
+	check(g.state == Game.State.PLAYING and not g.paused, "zurück im Spiel")
+	g._process(1.0)
+	check(g.circles[0]["value"] > v, "läuft weiter")
+	g.dev_mode = true
+	g._activate("pause")
+	ids.clear()
+	for b in g._buttons():
+		ids.append(b["id"])
+	check("dev" in ids and "resume" in ids, "Developer im Pause-Menü")
+	g.winner = 1; g.game_over = true
+	check(not g.has_game(), "nach Ende kein Fortfahren")
 	h.free()
 	print("Tests fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)
