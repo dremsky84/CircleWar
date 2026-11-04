@@ -17,6 +17,8 @@ const SEND_FRACTION := 0.5     # Anteil der vorhandenen Armee, der pro Wischen g
 const HOLD_DELAY := 0.4        # so lange auf dem Ziel halten, bis die Prozentanzeige erscheint
 const HOLD_RAMP := 1.5         # danach steigt sie in dieser Zeit von 50 auf 100 %
 const CHAIN_DWELL := 0.3       # so lange auf einem eigenen Planeten verweilen, um ihn in die Kette aufzunehmen
+const MASS_DELAY := 0.5        # so lange ruhig auf einem Planeten halten, bis der Massenangriff startet
+const MASS_CANCEL_RADIUS := 70.0  # Trefferfläche des roten X
 const TAP_TOLERANCE := 16.0    # Trefferfläche = sichtbarer Kreis + dieser Rand
 const MIN_HIT_RADIUS := 56.0   # auch kleine Kreise sind mindestens so gut treffbar
 const RELEASE_SNAP := 30.0     # beim Loslassen zählt ein Kreis auch knapp daneben
@@ -171,6 +173,12 @@ var shop_pause := false
 var shop_planet := -1
 var shop_votes := {1: false, 2: true}   # lokal: 1 = ich, 2 = Gegner (KI zählt immer als bereit)
 var press_pos := Vector2.ZERO
+# Massenangriff: lange auf einen Planeten drücken -> Prozentzähler, Loslassen schickt von allen eigenen Planeten
+var press_time := 0.0
+var press_moved := false
+var mass_active := false
+var mass_target := -1
+var mass_time := 0.0
 var chain_cand := -1           # eigener Planet unter dem Finger, der gerade aufgenommen wird
 var chain_time := 0.0
 var chain: Array = []          # eigene Planeten, über die gewischt wurde (Sammelangriff)
@@ -903,6 +911,9 @@ func _on_press(pos: Vector2) -> void:
 	hold_target = -1
 	hold_time = 0.0
 	press_index = _circle_at(pos)
+	press_time = 0.0
+	press_moved = false
+	mass_active = false
 	chain.clear()
 	chain_cand = -1
 	chain_time = 0.0
@@ -923,6 +934,11 @@ func _on_release(pos: Vector2) -> void:
 
 	drag_active = false
 	if state != State.PLAYING or game_over:
+		mass_active = false
+		return
+
+	if mass_active:
+		_mass_release(pos)
 		return
 
 	var target := _circle_at(pos, RELEASE_SNAP)
@@ -944,6 +960,82 @@ func _on_release(pos: Vector2) -> void:
 	chain_cand = -1
 	hold_target = -1
 	hold_time = 0.0
+	queue_redraw()
+
+
+# ---- Massenangriff ----
+
+# Position des roten Abbrechen-X: die Ecke, die am weitesten vom Ziel entfernt ist
+func _mass_cancel_pos() -> Vector2:
+	if mass_target < 0 or mass_target >= circles.size():
+		return Vector2(90.0, 200.0)
+	var tp: Vector2 = circles[mass_target]["pos"]
+	var corners := [Vector2(90.0, 190.0), Vector2(map_size.x - 90.0, 190.0),
+		Vector2(90.0, map_size.y - 110.0), Vector2(map_size.x - 90.0, map_size.y - 110.0)]
+	var best: Vector2 = corners[0]
+	for c in corners:
+		if c.distance_to(tp) > best.distance_to(tp):
+			best = c
+	return best
+
+
+func _mass_percent() -> int:
+	return 50 + roundi(clampf(mass_time / HOLD_RAMP, 0.0, 1.0) * 10.0) * 5
+
+
+func _mass_sources(target: int) -> Array:
+	var out := []
+	for i in circles.size():
+		if i != target and circles[i]["owner"] == 1 and floorf(circles[i]["value"]) >= 2.0:
+			out.append(i)
+	return out
+
+
+func _mass_total(target: int, percent: int) -> float:
+	var t := 0.0
+	for i in _mass_sources(target):
+		t += _amount_for_percent(i, percent)
+	return t
+
+
+# Läuft jeden Frame: erkennt langes ruhiges Halten auf einem Planeten und startet den Zähler
+func _mass_update(delta: float) -> void:
+	if mass_active:
+		mass_time += delta
+		return
+	if not drag_active or press_index < 0 or chain.size() > 1:
+		return
+	if drag_pos.distance_to(press_pos) > TAP_TOLERANCE * 1.5:
+		press_moved = true
+	if press_moved:
+		return
+	press_time += delta
+	if press_time >= MASS_DELAY:
+		mass_active = true
+		mass_target = press_index
+		mass_time = 0.0
+		selected = -1
+		chain.clear()
+		Input.vibrate_handheld(25)
+
+
+# Loslassen: auf dem Ziel = Angriff mit dem Zählerstand, sonst (z. B. auf dem roten X) abbrechen
+func _mass_release(pos: Vector2) -> void:
+	var target := mass_target
+	var percent := _mass_percent()
+	var on_target := target >= 0 and _circle_at(pos, RELEASE_SNAP) == target
+	var cancelled := pos.distance_to(_mass_cancel_pos()) <= MASS_CANCEL_RADIUS or not on_target
+	mass_active = false
+	mass_target = -1
+	mass_time = 0.0
+	press_index = -1
+	chain.clear()
+	hold_target = -1
+	hold_time = 0.0
+	selected = -1
+	if not cancelled:
+		for i in _mass_sources(target):
+			_player_send(i, target, percent)
 	queue_redraw()
 
 
@@ -1015,6 +1107,9 @@ func _hold_percent() -> int:
 
 # Läuft jeden Frame: misst, wie lange der Finger beim Zielen auf demselben Kreis liegt.
 func _update_hold(delta: float) -> void:
+	_mass_update(delta)
+	if mass_active:
+		return
 	_chain_update(delta)
 	var hover := -1
 	if drag_active and selected >= 0:
@@ -1181,6 +1276,8 @@ func _process(delta: float) -> void:
 		_pay_reward()
 	_mp_process(delta)
 	_update_music()
+	if mass_active and (game_over or paused or shop_pause or state != State.PLAYING):
+		mass_active = false
 	if game_over and shop_pause:
 		shop_pause = false
 		shop_planet = -1
@@ -2082,6 +2179,9 @@ func _draw_game(font: Font) -> void:
 		_draw_army(font, a)
 	_draw_fx()
 
+	if mass_active and mass_target >= 0 and mass_target < circles.size():
+		_draw_mass(font)
+
 	if drag_active and selected >= 0:
 		var end := drag_pos
 		var hover := _circle_at(drag_pos, RELEASE_SNAP)
@@ -2170,6 +2270,39 @@ func _draw_game(font: Font) -> void:
 
 
 # Developer-Anzeigen: Werkzeug, Pause und (optional) Diagnosewerte
+# Massenangriff: Linien von allen Quellen zum Ziel, Zähler am Ziel, rotes X zum Abbrechen
+func _draw_mass(font: Font) -> void:
+	var tc: Dictionary = circles[mass_target]
+	var tp: Vector2 = tc["pos"]
+	var pct := _mass_percent()
+	var xp := _mass_cancel_pos()
+	var over_x := drag_pos.distance_to(xp) <= MASS_CANCEL_RADIUS
+	var live := not over_x and _circle_at(drag_pos, RELEASE_SNAP) == mass_target
+	var fade := 1.0 if live else 0.35
+	for i in _mass_sources(mass_target):
+		draw_line(circles[i]["pos"], tp, Color(GOLD, 0.3 * fade), 3.0)
+		draw_arc(circles[i]["pos"], circles[i]["radius"] + 8.0, 0.0, TAU, 40, Color(GOLD, 0.8 * fade), 3.0)
+	var arc_r: float = tc["radius"] + 24.0
+	var frac := float(pct - 50) / 50.0
+	draw_arc(tp, arc_r, 0.0, TAU, 64, Color(1, 1, 1, 0.2), 8.0)
+	draw_arc(tp, arc_r, -PI * 0.5, -PI * 0.5 + TAU * maxf(frac, 0.02), 64, Color(GOLD, fade), 8.0)
+	var label_y: float = -tc["radius"] - 26.0
+	draw_rect(Rect2(tp + Vector2(-60.0, label_y - 68.0), Vector2(120.0, 94.0)), Color(BG_COLOR, 0.88), true)
+	draw_string(font, tp + Vector2(-60.0, label_y - 28.0), "%d %%" % pct,
+		HORIZONTAL_ALIGNMENT_CENTER, 120, 34, Color(GOLD, fade))
+	draw_string(font, tp + Vector2(-60.0, label_y + 6.0), "-> %d" % int(_mass_total(mass_target, pct)),
+		HORIZONTAL_ALIGNMENT_CENTER, 120, 24, Color(1, 1, 1, fade))
+	# rotes X
+	var r := 46.0 if not over_x else 56.0
+	draw_circle(xp, r, Color(0.85, 0.15, 0.18, 0.92))
+	draw_arc(xp, r, 0.0, TAU, 40, Color.WHITE, 3.0)
+	var k := r * 0.42
+	draw_line(xp + Vector2(-k, -k), xp + Vector2(k, k), Color.WHITE, 6.0)
+	draw_line(xp + Vector2(-k, k), xp + Vector2(k, -k), Color.WHITE, 6.0)
+	draw_string(font, xp + Vector2(-80.0, r + 26.0), "Abbrechen" if over_x else "Hierher wischen",
+		HORIZONTAL_ALIGNMENT_CENTER, 160, 20, Color.WHITE)
+
+
 # Upgrades am Planeten: Schildringe (blau), Geschützpunkte oben (orange), Beschleunigerpunkte unten (grün)
 func _draw_badges(c: Dictionary) -> void:
 	var r: float = c["radius"]

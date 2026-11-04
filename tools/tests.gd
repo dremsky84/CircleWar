@@ -239,6 +239,55 @@ func _initialize() -> void:
 	q._on_release(spots[1])
 	check(q.shop_pause and q.shop_planet == 1, "Antippen öffnet Upgrades")
 	q.free()
+	# Massenangriff
+	var m = Game.new()
+	root.add_child(m)
+	m.map_size = Vector2(720, 1280)
+	m.circles.clear()
+	var ms := [Vector2(100, 1000), Vector2(300, 1000), Vector2(500, 1000), Vector2(300, 300), Vector2(600, 400)]
+	var mo := [1, 1, 1, 2, 0]
+	for k in 5:
+		m.circles.append(m._make_circle(ms[k], 20.0, mo[k]))
+	m.circles[2]["value"] = 1.2
+	m.state = Game.State.PLAYING
+	m.level = Game.LEVELS[0]
+	m._compute_stats()
+	m.ai_timer = 1e9
+	m._on_press(ms[3])
+	m._update_hold(0.3)
+	check(not m.mass_active, "zu früh")
+	m._update_hold(0.3)
+	check(m.mass_active and m.mass_target == 3 and m._mass_percent() == 50, "Zähler startet bei 50 %")
+	m._update_hold(1.0)
+	check(m._mass_percent() == 85, "Zähler steigt")
+	check(m._mass_sources(3).size() == 2, "Planet mit zu wenig Armee sendet nicht")
+	m._on_release(ms[3])
+	check(m.armies.size() == 2 and not m.mass_active, "Loslassen sendet von allen")
+	for a in m.armies:
+		check(a["target"] == 3 and absf(a["amount"] - 17.0) < 0.01, "85 % von 20 = 17")
+	# Abbrechen über das rote X
+	m.armies.clear()
+	for k in 3:
+		m.circles[k]["value"] = 20.0
+	m._on_press(ms[3])
+	m._update_hold(0.6)
+	check(m.mass_active, "Zähler wieder aktiv")
+	m.drag_pos = m._mass_cancel_pos()
+	m._on_release(m._mass_cancel_pos())
+	check(m.armies.is_empty() and not m.mass_active, "X bricht ab")
+	# Wegwischen vom Ziel ohne X bricht ebenfalls ab
+	m._on_press(ms[3])
+	m._update_hold(0.6)
+	m._on_release(Vector2(360, 640))
+	check(m.armies.is_empty(), "Loslassen neben dem Ziel bricht ab")
+	# Wischen bewegt sich: kein Massenangriff
+	m._on_press(ms[0])
+	m.drag_pos = Vector2(200, 900)
+	m._update_hold(0.1)
+	m._update_hold(0.9)
+	check(not m.mass_active, "Bewegung verhindert Massenangriff")
+	m._on_release(Vector2(200, 900))
+	m.free()
 	h.free()
 	print("Tests fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)

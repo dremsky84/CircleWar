@@ -92,3 +92,9 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - Beim Wischen kurz (0,3 s) auf weiteren **eigenen** Planeten verweilen (goldener Ring füllt sich): Sie werden golden markiert und mit einer Linie verbunden.
 - Am Ende schicken alle Planeten der Kette ihren Anteil (50 %, per Halten bis 100 %) gemeinsam zum letzten Ziel. Endet der Wischer auf einem eigenen Planeten, sammeln sich die Armeen der vorherigen Planeten dort.
 - Die Anzeige am Ziel zeigt die Summe aller Armeen ("-> N"). Gilt auch im Mehrspieler.
+
+## Massenangriff
+
+- Einen Planeten **0,5 s ruhig gedrückt halten**: Ein Zähler startet bei 50 % und steigt bis 100 % (5-%-Schritte). Loslassen auf dem Ziel schickt diesen Anteil von **allen** eigenen Planeten dorthin (Planeten mit weniger als 2 Armee bleiben außen vor). Das Ziel zeigt die Summe.
+- **Abbrechen:** zum roten X (in der am weitesten entfernten Ecke) wischen und loslassen. Auch Loslassen neben dem Ziel bricht ab.
+- Gilt auch im Mehrspieler. Ein kurzer Tipp auf den eigenen Planeten öffnet weiter die Upgrades.
