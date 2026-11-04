@@ -98,3 +98,13 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - Einen Planeten **0,5 s ruhig gedrückt halten**: Ein Zähler startet bei 50 % und steigt bis 100 % (5-%-Schritte). Loslassen auf dem Ziel schickt diesen Anteil von **allen** eigenen Planeten dorthin (Planeten mit weniger als 2 Armee bleiben außen vor). Das Ziel zeigt die Summe.
 - **Abbrechen:** zum roten X (in der am weitesten entfernten Ecke) wischen und loslassen. Auch Loslassen neben dem Ziel bricht ab.
 - Gilt auch im Mehrspieler. Ein kurzer Tipp auf den eigenen Planeten öffnet weiter die Upgrades.
+
+## Levelarten
+
+Auswahl im Spielen-Menü (und beim Host im Mehrspieler-Lobby):
+
+- **Classic:** zufällige Karte wie bisher.
+- **Rush:** 26 kleine Planeten (3–10 Armee), Startarmee 10, Wachstum ×1,8, die KI denkt etwas langsamer. Münzen ×0,8.
+- **Rohstoff:** 2 Goldplaneten (Wachstum ×2) und 3 ausgebrannte (Wachstum ×0) unter den neutralen. Die KI bevorzugt Gold.
+- **Hügel:** Planet in der Mitte mit Stern; wer ihn 60 s durchgehend hält, gewinnt (Zähler am Planeten, Besitzerwechsel setzt zurück). Münzen ×1,2.
+- Simulation: `ltype=classic|rush|resource|hill`.

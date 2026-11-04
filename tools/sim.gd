@@ -17,6 +17,7 @@ func _initialize() -> void:
 	var interval := 2.5
 	var margin := 1.3
 	var type_id := "standard"
+	var ltype := "classic"
 	var upg := 0
 	var enemy := false
 	for arg in OS.get_cmdline_user_args():
@@ -30,6 +31,7 @@ func _initialize() -> void:
 			"upg": upg = int(kv[1])
 			"enemy": enemy = kv[1] == "1"
 			"botbuy": buy_chance = float(kv[1])
+			"ltype": ltype = kv[1]
 			"bot":
 				var parts := kv[1].split(",")
 				interval = float(parts[0])
@@ -42,7 +44,7 @@ func _initialize() -> void:
 		var timeouts := 0
 		var total_time := 0.0
 		for n in games:
-			var res := _play(lvl, circles, 1000 + n, interval, margin, type_id, upg, enemy)
+			var res := _play(lvl, circles, 1000 + n, interval, margin, type_id, upg, enemy, ltype)
 			total_time += res[1]
 			match res[0]:
 				1: wins += 1
@@ -56,13 +58,14 @@ func _initialize() -> void:
 
 # Rückgabe: [Ergebnis (1 Sieg, 2 Niederlage, 0 Zeitüberschreitung), Spielzeit]
 func _play(lvl: int, count: int, seed_value: int, interval: float, margin: float,
-		type_id: String = "standard", upg: int = 0, enemy: bool = false) -> Array:
+		type_id: String = "standard", upg: int = 0, enemy: bool = false, ltype: String = "classic") -> Array:
 	var g = Game.new()
 	root.add_child(g)
 	g.rng.seed = seed_value
 	g.difficulty = lvl
 	g.circle_count = count
 	g.selected_type = type_id
+	g.level_type = ltype
 	g.enemy_levels_up = enemy
 	for id in g.UPGRADE_IDS:
 		g.upgrade_levels[id] = upg
@@ -113,6 +116,8 @@ func _bot_think(g, margin: float) -> int:
 				if total >= need:
 					# mehrere Wischer kosten Zeit: schlechter bewerten
 					var score := 1.0 / (need + dist / 80.0) / k
+					if g.circles[dst]["kind"] == g.KIND_HILL:
+						score *= 2.5
 					if score > best_score:
 						best_score = score
 						best_src = src

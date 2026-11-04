@@ -288,6 +288,59 @@ func _initialize() -> void:
 	check(not m.mass_active, "Bewegung verhindert Massenangriff")
 	m._on_release(Vector2(200, 900))
 	m.free()
+	# Levelarten
+	var lv = Game.new()
+	root.add_child(lv)
+	lv.map_size = Vector2(720, 1280)
+	lv.level_type = "rush"
+	lv.start_game()
+	check(lv.circles.size() >= 20, "Rush: viele Planeten (%d)" % lv.circles.size())
+	check(lv.circles[0]["value"] == 10.0, "Rush: Startarmee 10")
+	check(absf(lv._rate(lv.circles[0]) - 1.8) < 0.01, "Rush: Wachstum 1,8")
+	lv.level_type = "resource"
+	lv.start_game()
+	var gold := 0
+	var dead := 0
+	for c in lv.circles:
+		if c["kind"] == Game.KIND_GOLD: gold += 1
+		if c["kind"] == Game.KIND_DEAD: dead += 1
+	check(gold == 2 and dead == 3, "Rohstoff: 2 Gold, 3 ausgebrannt (%d/%d)" % [gold, dead])
+	for c in lv.circles:
+		if c["kind"] == Game.KIND_GOLD:
+			c["owner"] = 1
+			check(absf(lv._rate(c) - 2.0) < 0.01, "Gold wächst x2")
+			break
+	for c in lv.circles:
+		if c["kind"] == Game.KIND_DEAD:
+			c["owner"] = 1
+			check(lv._rate(c) == 0.0, "Ausgebrannt wächst nicht")
+			break
+	lv.level_type = "hill"
+	lv.start_game()
+	lv.ai_timer = 1e9
+	var hill := -1
+	for i in lv.circles.size():
+		if lv.circles[i]["kind"] == Game.KIND_HILL:
+			hill = i
+	check(hill == 2 and absf(lv.circles[hill]["pos"].y - 640.0) < 1.0, "Hügel in der Mitte")
+	lv.circles[hill]["owner"] = 1
+	lv._tick(30.0)
+	check(not lv.game_over and absf(lv.hill_time - 30.0) < 0.01, "Hügel: 30 s gehalten")
+	lv.circles[hill]["owner"] = 2
+	lv._tick(0.1)
+	check(lv.hill_owner == 2 and lv.hill_time < 1.0, "Hügel: Besitzerwechsel setzt zurück")
+	lv.circles[hill]["owner"] = 1
+	lv._tick(0.1)
+	lv._tick(61.0)
+	check(lv.game_over and lv.winner == 1, "Hügel: 60 s = Sieg")
+	# Paket-Roundtrip (Netzwerk) behält Planetenart
+	lv.game_over = false
+	var pack: PackedFloat32Array = lv._pack_circles()
+	lv.mp_role = "client"
+	lv._apply_circles(pack, true)
+	check(lv.circles[hill]["kind"] == Game.KIND_HILL and lv.circles.size() == pack.size() / 10, "Paket mit Planetenart")
+	lv.mp_role = ""
+	lv.free()
 	h.free()
 	print("Tests fertig, Fehler: ", fails)
 	quit(1 if fails > 0 else 0)

@@ -102,6 +102,27 @@ const GUN_INTERVAL := 0.9
 const BOOST_MULT := [1.0, 1.25, 1.5, 1.75]
 const AI_KEEP := 10.0          # so viel Armee lässt die KI nach einem Kauf mindestens übrig
 
+# Levelarten
+const KIND_NORMAL := 0
+const KIND_GOLD := 1
+const KIND_DEAD := 2
+const KIND_HILL := 3
+const KIND_MULT := [1.0, 2.0, 0.0, 1.0]   # Wachstumsfaktor je Planetenart
+const LEVEL_TYPE_IDS := ["classic", "rush", "resource", "hill"]
+const LEVEL_TYPES := {
+	"classic": {"label": "Classic", "reward": 1.0, "desc": "Zufällige Karte wie gewohnt."},
+	"rush": {"label": "Rush", "reward": 0.8, "desc": "26 kleine Planeten, Wachstum ×1,8: kurz und hektisch."},
+	"resource": {"label": "Rohstoff", "reward": 1.0, "desc": "Goldplaneten wachsen ×2, ausgebrannte gar nicht."},
+	"hill": {"label": "Hügel", "reward": 1.2, "desc": "Halte den Planeten in der Mitte 60 s, dann gewinnst du."},
+}
+const RUSH_CIRCLES := 26
+const RUSH_START := 10.0
+const RUSH_GROWTH := 1.8
+const RUSH_AI_SLOWDOWN := 1.8   # mit so vielen kleinen Planeten denkt die KI langsamer (sonst überrennt sie alles)
+const HILL_GOAL := 60.0
+const GOLD_COUNT := 2
+const DEAD_COUNT := 3
+
 # Münzen pro Sieg je Schwierigkeit (bei 12 Kreisen)
 const REWARDS := [20, 40, 70, 110, 160]
 const LOSS_FACTOR := 0.25          # Niederlage gibt diesen Anteil
@@ -111,6 +132,9 @@ const REWARD_REF_CIRCLES := 12.0   # Bezugsgröße für die Kreisanzahl
 # Einstellungen und Fortschritt (werden gespeichert)
 var difficulty := 2
 var circle_count := 12
+var level_type := "classic"
+var hill_owner := 0            # wer den Hügel gerade hält (lokale Seite)
+var hill_time := 0.0           # wie lange schon, in Sekunden
 var dev_mode := false
 var enemy_levels_up := false
 var selected_type := "standard"
@@ -229,6 +253,8 @@ func _load_settings() -> void:
 	dev_mode = bool(cfg.get_value("game", "dev", false))
 	enemy_levels_up = bool(cfg.get_value("game", "enemy_levels", false))
 	last_ip = str(cfg.get_value("net", "ip", ""))
+	var lt := str(cfg.get_value("game", "level_type", "classic"))
+	level_type = lt if LEVEL_TYPES.has(lt) else "classic"
 	music_on = bool(cfg.get_value("audio", "music", true))
 	sfx_on = bool(cfg.get_value("audio", "sfx", true))
 	coins = maxi(0, int(cfg.get_value("progress", "coins", 0)))
@@ -251,6 +277,7 @@ func _save_settings() -> void:
 	cfg.set_value("game", "enemy_levels", enemy_levels_up)
 	cfg.set_value("game", "type", selected_type)
 	cfg.set_value("net", "ip", last_ip)
+	cfg.set_value("game", "level_type", level_type)
 	cfg.set_value("audio", "music", music_on)
 	cfg.set_value("audio", "sfx", sfx_on)
 	cfg.set_value("progress", "coins", coins)
@@ -344,6 +371,7 @@ func _reward_for(won: bool) -> int:
 	if not won:
 		base *= LOSS_FACTOR
 	base *= float(circle_count) / REWARD_REF_CIRCLES
+	base *= float(LEVEL_TYPES[level_type]["reward"])
 	if enemy_levels_up:
 		base *= ENEMY_LEVEL_BONUS
 	return maxi(1, roundi(base))
@@ -385,6 +413,8 @@ func start_game() -> void:
 	over_sound = false
 	shop_pause = false
 	shop_planet = -1
+	hill_owner = 0
+	hill_time = 0.0
 	shop_votes = {1: false, 2: mp_role == ""}
 	fx.clear()
 	level = LEVELS[difficulty]
@@ -397,13 +427,24 @@ func start_game() -> void:
 
 func _place_circles() -> void:
 	var start_y := TOP_MARGIN + 40.0
-	circles.append(_make_circle(Vector2(map_size.x * 0.5, map_size.y - start_y), START_VALUE, 1))
-	circles.append(_make_circle(Vector2(map_size.x * 0.5, start_y), START_VALUE, 2))
+	var count := circle_count
+	var vmin := 5
+	var vmax := 20
+	var start_value := START_VALUE
+	if level_type == "rush":
+		count = RUSH_CIRCLES
+		vmin = 3
+		vmax = 10
+		start_value = RUSH_START
+	circles.append(_make_circle(Vector2(map_size.x * 0.5, map_size.y - start_y), start_value, 1))
+	circles.append(_make_circle(Vector2(map_size.x * 0.5, start_y), start_value, 2))
+	if level_type == "hill":
+		circles.append(_make_circle(Vector2(map_size.x * 0.5, map_size.y * 0.5), 20.0, 0, KIND_HILL))
 
 	var attempts := 0
-	while circles.size() < circle_count and attempts < 4000:
+	while circles.size() < count and attempts < 4000:
 		attempts += 1
-		var value := float(rng.randi_range(5, 20))
+		var value := float(rng.randi_range(vmin, vmax))
 		var radius := _radius_for(value)
 		var p := Vector2(
 			rng.randf_range(EDGE_MARGIN, map_size.x - EDGE_MARGIN),
@@ -411,10 +452,28 @@ func _place_circles() -> void:
 		if _fits(p, radius):
 			circles.append(_make_circle(p, value, 0))
 
+	if level_type == "resource":
+		# Gold- und ausgebrannte Planeten unter den neutralen verteilen
+		var neutral := []
+		for i in circles.size():
+			if circles[i]["owner"] == 0:
+				neutral.append(i)
+		for k in neutral.size():  # mischen
+			var j := rng.randi_range(k, neutral.size() - 1)
+			var tmp: int = neutral[k]
+			neutral[k] = neutral[j]
+			neutral[j] = tmp
+		var gold := mini(GOLD_COUNT, neutral.size() / 3)
+		var dead := mini(DEAD_COUNT, neutral.size() / 3)
+		for k in gold:
+			circles[neutral[k]]["kind"] = KIND_GOLD
+		for k in dead:
+			circles[neutral[gold + k]]["kind"] = KIND_DEAD
 
-func _make_circle(pos: Vector2, value: float, owner: int) -> Dictionary:
+
+func _make_circle(pos: Vector2, value: float, owner: int, kind: int = KIND_NORMAL) -> Dictionary:
 	return {"pos": pos, "value": value, "owner": owner, "radius": _radius_for(value),
-		"shield": 0, "gun": 0, "boost": 0, "gun_t": 0.0}
+		"shield": 0, "gun": 0, "boost": 0, "gun_t": 0.0, "kind": kind}
 
 
 func _radius_for(value: float) -> float:
@@ -537,6 +596,17 @@ func _shop_rows() -> Array:
 	return rows
 
 
+# Vier Knöpfe zur Wahl der Levelart
+func _level_type_buttons(cx: float, bw: float, y: float) -> Array:
+	var out := []
+	var w := (bw - 30.0) / 4.0
+	for i in LEVEL_TYPE_IDS.size():
+		var id: String = LEVEL_TYPE_IDS[i]
+		out.append(_btn("lt_" + id, Rect2(cx - bw * 0.5 + i * (w + 10.0), y, w, 70.0),
+			LEVEL_TYPES[id]["label"], 22))
+	return out
+
+
 # Liefert die aktuell sichtbaren Knöpfe als [{id, rect, label, size, lines, enabled}]
 func _buttons() -> Array:
 	var list := []
@@ -571,11 +641,12 @@ func _buttons() -> Array:
 		State.SETUP:
 			list.append(_btn("back", Rect2(20.0, off + 16.0, 150.0, 56.0), "Zurück", 26))
 			for i in LEVELS.size():
-				list.append(_btn("d%d" % i, Rect2(cx - bw * 0.5, off + 198.0 + i * 84.0, bw, 76.0),
-					LEVELS[i]["label"], 28, ["Gegner: " + LEVELS[i]["name"]]))
-			var row_y := off + 712.0
-			list.append(_btn("minus", Rect2(cx - bw * 0.5, row_y, 110.0, 70.0), "-"))
-			list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, row_y, 110.0, 70.0), "+"))
+				list.append(_btn("d%d" % i, Rect2(cx - bw * 0.5, off + 198.0 + i * 70.0, bw, 62.0),
+					LEVELS[i]["label"], 26, ["Gegner: " + LEVELS[i]["name"]]))
+			list.append_array(_level_type_buttons(cx, bw, off + 618.0))
+			var row_y := off + 750.0
+			list.append(_btn("minus", Rect2(cx - bw * 0.5, row_y, 110.0, 70.0), "-", 34, [], level_type != "rush"))
+			list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, row_y, 110.0, 70.0), "+", 34, [], level_type != "rush"))
 			var tw := (bw - 20.0) / 3.0
 			for i in TYPE_IDS.size():
 				var tid: String = TYPE_IDS[i]
@@ -583,14 +654,14 @@ func _buttons() -> Array:
 				var is_open := tid in unlocked
 				var lines := ["Kraft ×" + _fmt(t["power"]), "Tempo ×" + _fmt(t["speed"])] if is_open \
 					else ["gesperrt", "(Werkstatt)"]
-				var b := _btn("type_" + tid, Rect2(cx - bw * 0.5 + i * (tw + 10.0), off + 842.0, tw, 112.0),
+				var b := _btn("type_" + tid, Rect2(cx - bw * 0.5 + i * (tw + 10.0), off + 862.0, tw, 100.0),
 					t["label"], 26, lines, is_open)
 				b["shape"] = t["shape"]
 				list.append(b)
-			list.append(_btn("enemy_toggle", Rect2(cx - bw * 0.5, off + 966.0, bw, 76.0),
-				"Gegner levelt mit: " + ("An" if enemy_levels_up else "Aus"), 26,
+			list.append(_btn("enemy_toggle", Rect2(cx - bw * 0.5, off + 972.0, bw, 66.0),
+				"Gegner levelt mit: " + ("An" if enemy_levels_up else "Aus"), 24,
 				["Gegner bekommt deine Verstärkungen, Münzen ×1,5"]))
-			list.append(_btn("start", Rect2(cx - bw * 0.5, off + 1058.0, bw, 108.0), "Spiel starten", 34))
+			list.append(_btn("start", Rect2(cx - bw * 0.5, off + 1048.0, bw, 100.0), "Spiel starten", 34))
 		State.WORKSHOP:
 			list.append(_btn("back", Rect2(20.0, off + 16.0, 150.0, 56.0), "Zurück", 26))
 			for row in _workshop_rows():
@@ -607,8 +678,9 @@ func _buttons() -> Array:
 						"Beitreten: " + str(ips[i]), 26))
 				list.append(_btn("mp_connect", Rect2(cx - bw * 0.5, off + 825.0, bw, 90.0), "Verbinden", 30))
 			elif mp_status == "hosting":
-				list.append(_btn("minus", Rect2(cx - bw * 0.5, off + 520.0, 110.0, 70.0), "-"))
-				list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, off + 520.0, 110.0, 70.0), "+"))
+				list.append(_btn("minus", Rect2(cx - bw * 0.5, off + 520.0, 110.0, 70.0), "-", 34, [], level_type != "rush"))
+				list.append(_btn("plus", Rect2(cx + bw * 0.5 - 110.0, off + 520.0, 110.0, 70.0), "+", 34, [], level_type != "rush"))
+				list.append_array(_level_type_buttons(cx, bw, off + 650.0))
 		State.PLAYING:
 			if game_over:
 				var gw := 400.0
@@ -650,6 +722,8 @@ func _button_at(pos: Vector2) -> String:
 func _is_active(id: String) -> bool:
 	if id == "d%d" % difficulty:
 		return true
+	if id.begins_with("lt_"):
+		return id.substr(3) == level_type
 	if id.begins_with("type_"):
 		return id.substr(5) == selected_type
 	match id:
@@ -784,7 +858,10 @@ func _activate(id: String) -> void:
 		"dev_tool_off":
 			dev_tool = ""
 		_:
-			if id.begins_with("ub_"):
+			if id.begins_with("lt_"):
+				level_type = id.substr(3)
+				_save_settings()
+			elif id.begins_with("ub_"):
 				_shop_buy_request(id.substr(3))
 			elif id.begins_with("join_"):
 				_mp_join(id.substr(5))
@@ -1293,12 +1370,44 @@ func _process(delta: float) -> void:
 	queue_redraw()
 
 
+# Wachstum eines Planeten pro Sekunde (Besitzer, Planetenart und Levelart eingerechnet)
+func _rate(c: Dictionary) -> float:
+	var o: int = c["owner"]
+	if o == 0:
+		return 0.0
+	var f := RUSH_GROWTH if level_type == "rush" else 1.0
+	return BASE_GROWTH * _growth(o) * float(KIND_MULT[int(c.get("kind", 0))]) * f
+
+
+# König des Hügels: Wer den Hügel durchgehend hält, gewinnt nach HILL_GOAL Sekunden
+func _hill_tick(delta: float) -> void:
+	if level_type != "hill":
+		return
+	var idx := -1
+	for i in circles.size():
+		if int(circles[i].get("kind", 0)) == KIND_HILL:
+			idx = i
+			break
+	if idx < 0:
+		return
+	var o: int = circles[idx]["owner"]
+	if o != hill_owner:
+		hill_owner = o
+		hill_time = 0.0
+	if o != 0:
+		hill_time += delta
+		if hill_time >= HILL_GOAL and mp_role != "client" and not game_over:
+			game_over = true
+			winner = o
+			drag_active = false
+			selected = -1
+
+
 # Ein Simulationsschritt (auch für Testläufe ohne Anzeige nutzbar)
 func _tick(delta: float) -> void:
 	for c in circles:
-		var o: int = c["owner"]
-		if o != 0:
-			c["value"] += BASE_GROWTH * _growth(o) * delta
+		c["value"] += _rate(c) * delta
+	_hill_tick(delta)
 
 	for army in armies.duplicate():
 		var dist: float = maxf(army["from"].distance_to(army["to"]), 1.0)
@@ -1312,7 +1421,7 @@ func _tick(delta: float) -> void:
 	if mp_role == "" and not dev_ai_frozen:
 		ai_timer -= delta
 		if ai_timer <= 0.0:
-			ai_timer = level["interval"]
+			ai_timer = float(level["interval"]) * (RUSH_AI_SLOWDOWN if level_type == "rush" else 1.0)
 			_ai_think()
 
 	_check_winner()
@@ -1659,8 +1768,8 @@ func _pack_circles() -> PackedFloat32Array:
 		var o: int = c["owner"]
 		out.append_array(PackedFloat32Array([
 			c["pos"].x / map_size.x, c["pos"].y / map_size.y, c["value"], float(o),
-			BASE_GROWTH * _growth(o) if o != 0 else 0.0, c["radius"],
-			float(c["shield"]), float(c["gun"]), float(c["boost"])]))
+			_rate(c), c["radius"],
+			float(c["shield"]), float(c["gun"]), float(c["boost"]), float(c["kind"])]))
 	return out
 
 
@@ -1676,24 +1785,25 @@ func _pack_armies() -> PackedFloat32Array:
 
 # Client: Kreise aus den Host-Daten übernehmen (gespiegelt, Seiten getauscht)
 func _apply_circles(c: PackedFloat32Array, full: bool) -> void:
-	var n := c.size() / 9
+	var n := c.size() / 10
 	if full:
 		circles.clear()
 		for i in n:
 			circles.append({"pos": Vector2.ZERO, "value": 0.0, "owner": 0, "radius": 0.0, "rate": 0.0,
-				"shield": 0, "gun": 0, "boost": 0, "gun_t": 0.0})
+				"shield": 0, "gun": 0, "boost": 0, "gun_t": 0.0, "kind": 0})
 	if circles.size() != n:
 		return
 	for i in n:
 		var d: Dictionary = circles[i]
-		d["pos"] = Vector2(c[i * 9] * map_size.x, (1.0 - c[i * 9 + 1]) * map_size.y)
-		d["value"] = c[i * 9 + 2]
-		d["owner"] = _swap(int(c[i * 9 + 3]))
-		d["rate"] = c[i * 9 + 4]
-		d["radius"] = c[i * 9 + 5]
-		d["shield"] = int(c[i * 9 + 6])
-		d["gun"] = int(c[i * 9 + 7])
-		d["boost"] = int(c[i * 9 + 8])
+		d["pos"] = Vector2(c[i * 10] * map_size.x, (1.0 - c[i * 10 + 1]) * map_size.y)
+		d["value"] = c[i * 10 + 2]
+		d["owner"] = _swap(int(c[i * 10 + 3]))
+		d["rate"] = c[i * 10 + 4]
+		d["radius"] = c[i * 10 + 5]
+		d["shield"] = int(c[i * 10 + 6])
+		d["gun"] = int(c[i * 10 + 7])
+		d["boost"] = int(c[i * 10 + 8])
+		d["kind"] = int(c[i * 10 + 9])
 
 
 func _apply_armies(a: PackedFloat32Array) -> void:
@@ -1715,6 +1825,14 @@ func _client_tick(delta: float) -> void:
 			c["value"] += float(c.get("rate", 0.0)) * delta
 	for a in armies:
 		a["progress"] = minf(a["progress"] + float(a.get("rate", 0.0)) * delta, 1.0)
+	_hill_tick(delta)
+
+
+func _has_kind(kind: int) -> bool:
+	for c in circles:
+		if int(c.get("kind", 0)) == kind:
+			return true
+	return false
 
 
 func _player_send(src: int, dst: int, percent: int) -> void:
@@ -1731,6 +1849,7 @@ func rpc_begin(c: PackedFloat32Array) -> void:
 		return
 	map_size = get_viewport_rect().size if is_inside_tree() else DESIGN_SIZE
 	_apply_circles(c, true)
+	level_type = "hill" if _has_kind(KIND_HILL) else "classic"
 	armies.clear()
 	fx.clear()
 	selected = -1
@@ -1747,6 +1866,8 @@ func rpc_begin(c: PackedFloat32Array) -> void:
 	shop_pause = false
 	shop_planet = -1
 	shop_votes = {1: false, 2: false}
+	hill_owner = 0
+	hill_time = 0.0
 	level = LEVELS[difficulty]
 	_compute_stats()
 	mp_status = "playing"
@@ -1927,6 +2048,10 @@ func _ai_attack(own: Array, others: Array) -> bool:
 			var score: float = 1.0 / (need + dist / 80.0)
 			if circles[dst]["owner"] == 1:
 				score *= bonus
+			if circles[dst]["kind"] == KIND_HILL:
+				score *= 2.5
+			elif circles[dst]["kind"] == KIND_GOLD:
+				score *= 1.5
 			if score > best_score:
 				best_score = score
 				best_src = src
@@ -1949,7 +2074,7 @@ func _needed(owner: int, src: int, dst: int, count_inflight: bool = true) -> flo
 	var dst_owner: int = circles[dst]["owner"]
 	var atk := _power(owner)
 	if dst_owner != 0 and dst_owner != owner:
-		v += BASE_GROWTH * _growth(dst_owner) * dist / (ARMY_SPEED * _speed(owner) * BOOST_MULT[int(circles[src]["boost"])])
+		v += _rate(circles[dst]) * dist / (ARMY_SPEED * _speed(owner) * BOOST_MULT[int(circles[src]["boost"])])
 	var eff := v * _power(dst_owner) * _shield(circles[dst])
 	if count_inflight:
 		for a in armies:
@@ -2061,10 +2186,13 @@ func _draw_setup(font: Font) -> void:
 	_draw_coins(font, off)
 	_text(font, off + 186.0, "Schwierigkeit", 22, Color(1, 1, 1, 0.7))
 	_draw_buttons(font)
-	_text(font, off + 646.0, level_info(), 20, Color(1, 1, 1, 0.85))
-	_text(font, off + 700.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
-	_text(font, off + 712.0 + 48.0, str(circle_count), 40, Color.WHITE)
-	_text(font, off + 832.0, "Armeetyp", 22, Color(1, 1, 1, 0.7))
+	_text(font, off + 570.0, level_info(), 19, Color(1, 1, 1, 0.85))
+	_text(font, off + 606.0, "Levelart", 22, Color(1, 1, 1, 0.7))
+	_text(font, off + 710.0, LEVEL_TYPES[level_type]["desc"], 18, Color(GOLD, 0.9))
+	_text(font, off + 738.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
+	var count_text := str(circle_count) if level_type != "rush" else "%d (Rush)" % RUSH_CIRCLES
+	_text(font, off + 750.0 + 48.0, count_text, 40, Color.WHITE)
+	_text(font, off + 850.0, "Armeetyp", 22, Color(1, 1, 1, 0.7))
 
 
 func _draw_multi(font: Font) -> void:
@@ -2090,8 +2218,11 @@ func _draw_multi(font: Font) -> void:
 			_text(font, off + 410.0, "Ohne WLAN: mobilen Hotspot einschalten, der andere verbindet sich damit.",
 				18, Color(1, 1, 1, 0.55))
 			_text(font, off + 500.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
-			_text(font, off + 520.0 + 48.0, str(circle_count), 40, Color.WHITE)
-			_text(font, off + 680.0, "Beide spielen mit Standard-Armeen, ohne Verstärkungen.",
+			_text(font, off + 520.0 + 48.0, str(circle_count) if level_type != "rush" else "%d (Rush)" % RUSH_CIRCLES,
+				40, Color.WHITE)
+			_text(font, off + 638.0, "Levelart", 22, Color(1, 1, 1, 0.7))
+			_text(font, off + 742.0, LEVEL_TYPES[level_type]["desc"], 18, Color(GOLD, 0.9))
+			_text(font, off + 800.0, "Beide spielen mit Standard-Armeen, ohne Verstärkungen.",
 				20, Color(1, 1, 1, 0.6))
 		"connecting":
 			_text(font, off + 400.0, "Verbinde …", 36, Color.WHITE)
@@ -2166,6 +2297,7 @@ func _draw_game(font: Font) -> void:
 		if i == selected:
 			draw_arc(c["pos"], c["radius"] + 8.0, 0.0, TAU, 48, Color.WHITE, 3.0)
 		_draw_badges(c)
+		_draw_kind(font, c)
 		if shop_pause and i == shop_planet:
 			draw_arc(c["pos"], c["radius"] + 12.0, 0.0, TAU, 48, GOLD, 4.0)
 		var label := "%.1f" % c["value"] if (dev_mode and dev_info) else str(int(c["value"]))
@@ -2301,6 +2433,32 @@ func _draw_mass(font: Font) -> void:
 	draw_line(xp + Vector2(-k, k), xp + Vector2(k, -k), Color.WHITE, 6.0)
 	draw_string(font, xp + Vector2(-80.0, r + 26.0), "Abbrechen" if over_x else "Hierher wischen",
 		HORIZONTAL_ALIGNMENT_CENTER, 160, 20, Color.WHITE)
+
+
+# Planetenart: Gold (×2), ausgebrannt (×0), Hügel mit Haltezeit
+func _draw_kind(font: Font, c: Dictionary) -> void:
+	var kind := int(c.get("kind", 0))
+	if kind == KIND_NORMAL:
+		return
+	var pos: Vector2 = c["pos"]
+	var r: float = c["radius"]
+	match kind:
+		KIND_GOLD:
+			draw_arc(pos, r + 3.0, 0.0, TAU, 48, GOLD, 3.0)
+			draw_string(font, pos + Vector2(-30.0, r + 24.0), "×2", HORIZONTAL_ALIGNMENT_CENTER, 60, 20, GOLD)
+		KIND_DEAD:
+			draw_circle(pos, r, Color(0, 0, 0, 0.4))
+			draw_line(pos + Vector2(-r * 0.5, -r * 0.5), pos + Vector2(r * 0.5, r * 0.5), Color(1, 1, 1, 0.25), 3.0)
+			draw_line(pos + Vector2(-r * 0.5, r * 0.5), pos + Vector2(r * 0.5, -r * 0.5), Color(1, 1, 1, 0.25), 3.0)
+			draw_string(font, pos + Vector2(-30.0, r + 24.0), "×0", HORIZONTAL_ALIGNMENT_CENTER, 60, 20, Color(1, 1, 1, 0.5))
+		KIND_HILL:
+			var col: Color = COLORS[c["owner"]] if c["owner"] != 0 else GOLD
+			draw_arc(pos, r + 6.0, 0.0, TAU, 64, Color(1, 1, 1, 0.2), 6.0)
+			if hill_owner != 0 and hill_time > 0.0:
+				draw_arc(pos, r + 6.0, -PI * 0.5, -PI * 0.5 + TAU * clampf(hill_time / HILL_GOAL, 0.0, 1.0), 64, col.lightened(0.3), 6.0)
+			_draw_shape("star", pos + Vector2(0.0, -r - 22.0), Vector2.RIGHT, 9.0, GOLD)
+			var txt := "Hügel" if hill_owner == 0 else "%d s" % int(ceilf(HILL_GOAL - hill_time))
+			draw_string(font, pos + Vector2(-40.0, r + 28.0), txt, HORIZONTAL_ALIGNMENT_CENTER, 80, 22, GOLD)
 
 
 # Upgrades am Planeten: Schildringe (blau), Geschützpunkte oben (orange), Beschleunigerpunkte unten (grün)
