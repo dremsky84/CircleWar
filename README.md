@@ -69,3 +69,9 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - Der Host rechnet das Spiel, der Client bekommt den Zustand ca. 15× pro Sekunde und schickt seine Wisch-Befehle; die Karte ist für den Client gespiegelt, sodass er immer unten spielt.
 - Beide spielen mit Standard-Armeen (keine Verstärkungen, keine Münzen). Der Host startet Revanche mit "Nochmal".
 - Test auf einem Rechner: `tools/net_test.gd` (Host und Client als zwei Prozesse).
+
+## Musik und Sound
+
+- Alles selbst erzeugt (keine fremden Dateien): `python3 tools/make_audio.py` schreibt die Dateien nach `audio/` (benötigt numpy, scipy, ffmpeg).
+- Menü-Musik und Spiel-Musik als Schleife; Effekte für Klick, Senden, Kampf, Eroberung, Verlust, Sieg und Niederlage.
+- Im Hauptmenü lassen sich **Musik** und **Sound** getrennt aus- und einschalten (wird gespeichert).

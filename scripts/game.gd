@@ -24,6 +24,7 @@ const MAX_CIRCLES := 30
 const NET_PORT := 24600          # Mehrspieler (ENet) im WLAN
 const DISCOVERY_PORT := 24601    # Broadcast, damit Spiele im WLAN gefunden werden
 const SNAPSHOT_RATE := 15.0      # Zustandsübertragungen pro Sekunde
+const MUSIC_VOLUME_DB := -9.0
 const SETTINGS_PATH := "user://settings.cfg"
 const SPEEDS := [0.5, 1.0, 2.0, 4.0]
 const SPEED_LABELS := ["0.5", "1", "2", "4"]
@@ -138,6 +139,16 @@ var mp_snap_timer := 0.0
 var mp_end_sent := false
 var last_ip := ""
 var ip_edit: LineEdit = null
+# Audio
+var music_on := true
+var sfx_on := true
+var audio_enabled := false
+var music_player: AudioStreamPlayer = null
+var sfx_players: Array = []
+var audio_cache: Dictionary = {}
+var sfx_last: Dictionary = {}
+var music_track := ""
+var over_sound := false
 var title_taps := 0            # Geheimcode: 5x auf den Titel tippen
 var title_tap_time := 0
 var toast := ""
@@ -152,6 +163,7 @@ func _ready() -> void:
 	ip_edit.visible = false
 	add_child(ip_edit)
 	_load_settings()
+	_setup_audio()
 	ip_edit.text = last_ip
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
@@ -184,6 +196,8 @@ func _load_settings() -> void:
 	dev_mode = bool(cfg.get_value("game", "dev", false))
 	enemy_levels_up = bool(cfg.get_value("game", "enemy_levels", false))
 	last_ip = str(cfg.get_value("net", "ip", ""))
+	music_on = bool(cfg.get_value("audio", "music", true))
+	sfx_on = bool(cfg.get_value("audio", "sfx", true))
 	coins = maxi(0, int(cfg.get_value("progress", "coins", 0)))
 	for id in UPGRADE_IDS:
 		upgrade_levels[id] = clampi(int(cfg.get_value("progress", "lvl_" + id, 0)), 0, MAX_LEVEL)
@@ -204,6 +218,8 @@ func _save_settings() -> void:
 	cfg.set_value("game", "enemy_levels", enemy_levels_up)
 	cfg.set_value("game", "type", selected_type)
 	cfg.set_value("net", "ip", last_ip)
+	cfg.set_value("audio", "music", music_on)
+	cfg.set_value("audio", "sfx", sfx_on)
 	cfg.set_value("progress", "coins", coins)
 	for id in UPGRADE_IDS:
 		cfg.set_value("progress", "lvl_" + id, upgrade_levels[id])
@@ -333,6 +349,7 @@ func start_game() -> void:
 	reward = 0
 	reward_paid = false
 	paused = false
+	over_sound = false
 	fx.clear()
 	level = LEVELS[difficulty]
 	_compute_stats()
@@ -466,6 +483,11 @@ func _buttons() -> Array:
 				list.append(_btn("go_setup", Rect2(cx - bw * 0.5, off + 400.0, bw, 130.0), "Spielen", 44))
 				list.append(_btn("go_workshop", Rect2(cx - bw * 0.5, off + 560.0, bw, 110.0), "Werkstatt", 38))
 				list.append(_btn("go_multi", Rect2(cx - bw * 0.5, off + 690.0, bw, 100.0), "Mehrspieler (WLAN)", 30))
+			var hw := (bw - 10.0) * 0.5
+			list.append(_btn("toggle_music", Rect2(cx - bw * 0.5, off + 910.0, hw, 70.0),
+				"Musik: " + ("An" if music_on else "Aus"), 24))
+			list.append(_btn("toggle_sfx", Rect2(cx - bw * 0.5 + hw + 10.0, off + 910.0, hw, 70.0),
+				"Sound: " + ("An" if sfx_on else "Aus"), 24))
 			if dev_mode:
 				var w := (bw - 20.0) / 3.0
 				list.append(_btn("dev_coins", Rect2(cx - bw * 0.5, off + 1070.0, w, 70.0), "+1000", 22, ["Münzen"]))
@@ -555,6 +577,8 @@ func _is_active(id: String) -> bool:
 		"dev_info": return dev_info
 		"dev_toggle": return dev_mode
 		"enemy_toggle": return enemy_levels_up
+		"toggle_music": return music_on
+		"toggle_sfx": return sfx_on
 		"dev_tool_owner": return dev_tool == "owner"
 		"dev_tool_plus": return dev_tool == "plus"
 		"dev_tool_minus": return dev_tool == "minus"
@@ -563,7 +587,14 @@ func _is_active(id: String) -> bool:
 
 
 func _activate(id: String) -> void:
+	_play_sfx("click")
 	match id:
+		"toggle_music":
+			music_on = not music_on
+			_save_settings()
+		"toggle_sfx":
+			sfx_on = not sfx_on
+			_save_settings()
 		"go_setup":
 			state = State.SETUP
 		"go_workshop":
@@ -918,6 +949,7 @@ func _resolve(army: Dictionary) -> void:
 	var atk: float = army["amount"] * _power(owner)
 	var dfn: float = dst["value"] * _power(dst["owner"])
 	_spawn_fx(dst, owner, atk > dfn)
+	_battle_sound(owner, dst["owner"], atk > dfn)
 	if atk > dfn and (owner == 1 or dst["owner"] == 1):
 		Input.vibrate_handheld(60)  # Kreis erobert (oder verloren)
 	if mp_role == "host" and mp_peer != null and mp_status == "playing":
@@ -1002,6 +1034,10 @@ func _process(delta: float) -> void:
 	if state == State.PLAYING and game_over and not reward_paid:
 		_pay_reward()
 	_mp_process(delta)
+	_update_music()
+	if state == State.PLAYING and game_over and not over_sound:
+		over_sound = true
+		_play_sfx("win" if winner == 1 else "lose")
 	var running := state == State.PLAYING and not game_over and not paused and mp_role != "client"
 	if running:
 		_update_hold(delta)
@@ -1032,6 +1068,83 @@ func _tick(delta: float) -> void:
 			_ai_think()
 
 	_check_winner()
+
+
+# ---------- Audio ----------
+
+func _setup_audio() -> void:
+	audio_enabled = DisplayServer.get_name() != "headless"
+	if not audio_enabled:
+		return
+	music_player = AudioStreamPlayer.new()
+	music_player.volume_db = MUSIC_VOLUME_DB
+	add_child(music_player)
+	for i in 6:
+		var p := AudioStreamPlayer.new()
+		add_child(p)
+		sfx_players.append(p)
+
+
+func _audio(file: String) -> AudioStream:
+	if audio_cache.has(file):
+		return audio_cache[file]
+	var path := "res://audio/" + file
+	var st: AudioStream = null
+	if ResourceLoader.exists(path):
+		st = load(path)
+		if st is AudioStreamOggVorbis:
+			st.loop = true
+	audio_cache[file] = st
+	return st
+
+
+func _play_sfx(sfx_name: String, volume_db: float = 0.0) -> void:
+	if not audio_enabled or not sfx_on:
+		return
+	var now := Time.get_ticks_msec()
+	if now - int(sfx_last.get(sfx_name, -1000)) < 70:
+		return  # nicht dasselbe Geräusch mehrfach übereinander
+	sfx_last[sfx_name] = now
+	var st := _audio("sfx_%s.wav" % sfx_name)
+	if st == null:
+		return
+	for p in sfx_players:
+		if not p.playing:
+			p.stream = st
+			p.volume_db = volume_db
+			p.play()
+			return
+
+
+func _battle_sound(attacker: int, defender: int, conquered: bool) -> void:
+	_play_sfx("hit", 0.0 if (attacker == 1 or defender == 1) else -8.0)
+	if conquered:
+		if attacker == 1:
+			_play_sfx("conquer")
+		elif defender == 1:
+			_play_sfx("lost")
+
+
+# Musik je nach Bildschirm: Menü-Stück in den Menüs, Spiel-Stück in der Partie, im Pausenmenü leiser
+func _update_music() -> void:
+	if not audio_enabled or music_player == null:
+		return
+	var want := ""
+	if music_on:
+		if state == State.PLAYING:
+			want = "" if game_over else "game"
+		else:
+			want = "menu"
+	if want != music_track:
+		music_track = want
+		if want == "":
+			music_player.stop()
+		else:
+			var st := _audio("music_%s.ogg" % want)
+			if st != null:
+				music_player.stream = st
+				music_player.play()
+	music_player.volume_db = MUSIC_VOLUME_DB - (9.0 if (state == State.PLAYING and paused) else 0.0)
 
 
 # ---------- Mehrspieler (WLAN) ----------
@@ -1236,8 +1349,9 @@ func _client_tick(delta: float) -> void:
 func _player_send(src: int, dst: int, percent: int) -> void:
 	if mp_role == "client":
 		rpc_command.rpc_id(1, src, dst, percent)
-	else:
-		_send_amount(1, src, dst, _amount_for_percent(src, percent))
+		_play_sfx("send")
+	elif _send_amount(1, src, dst, _amount_for_percent(src, percent)):
+		_play_sfx("send")
 
 
 @rpc("authority", "reliable")
@@ -1258,6 +1372,7 @@ func rpc_begin(c: PackedFloat32Array) -> void:
 	reward = 0
 	reward_paid = true
 	paused = false
+	over_sound = false
 	level = LEVELS[difficulty]
 	_compute_stats()
 	mp_status = "playing"
@@ -1289,6 +1404,7 @@ func rpc_fx(idx: int, attacker: int, conquered: bool) -> void:
 		return
 	var local_attacker := _swap(attacker)
 	_spawn_fx(circles[idx], local_attacker, conquered)
+	_battle_sound(local_attacker, circles[idx]["owner"], conquered)
 	if conquered and (local_attacker == 1 or circles[idx]["owner"] == 1):
 		Input.vibrate_handheld(60)
 
