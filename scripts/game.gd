@@ -1937,6 +1937,8 @@ func _draw_multi(font: Font) -> void:
 				22, Color(1, 1, 1, 0.7))
 			_text(font, off + 720.0, "Oder IP-Adresse des Hosts eingeben", 22, Color(1, 1, 1, 0.7))
 			_text(font, off + 950.0, "Beide Handys müssen im selben WLAN sein.", 20, Color(1, 1, 1, 0.55))
+			_text(font, off + 985.0, "Kein WLAN? Ein Handy schaltet seinen mobilen Hotspot ein,", 20, Color(1, 1, 1, 0.55))
+			_text(font, off + 1010.0, "das andere verbindet sich damit. Dann ganz normal spielen.", 20, Color(1, 1, 1, 0.55))
 		"hosting":
 			_text(font, off + 280.0, "Warte auf Mitspieler …", 36, Color.WHITE)
 			var ips := _local_ips()
@@ -1944,6 +1946,8 @@ func _draw_multi(font: Font) -> void:
 				24, GOLD)
 			_text(font, off + 380.0, "Der Mitspieler findet dich automatisch oder gibt die IP ein.",
 				20, Color(1, 1, 1, 0.65))
+			_text(font, off + 410.0, "Ohne WLAN: mobilen Hotspot einschalten, der andere verbindet sich damit.",
+				18, Color(1, 1, 1, 0.55))
 			_text(font, off + 500.0, "Anzahl Kreise", 22, Color(1, 1, 1, 0.7))
 			_text(font, off + 520.0 + 48.0, str(circle_count), 40, Color.WHITE)
 			_text(font, off + 680.0, "Beide spielen mit Standard-Armeen, ohne Verstärkungen.",

@@ -84,3 +84,5 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 - Weiter geht es erst, wenn alle Spieler "Weiter" gedrückt haben (Einzelspiel: nur du).
 - Die KI kauft je nach Schwierigkeit (Mittel selten, Unspielbar häufig), wenn sie gerade keinen Angriff starten kann.
 - Simulation: `botbuy=<0..1>` lässt den Bot ebenfalls kaufen.
+
+- Ohne WLAN: Ein Handy schaltet seinen **mobilen Hotspot** ein, das andere verbindet sich damit; danach läuft der Mehrspieler unverändert (Hinweis steht auch in den Menüs).
