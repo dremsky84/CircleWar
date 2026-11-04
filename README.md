@@ -89,6 +89,6 @@ Zum Messen der Stärke gibt es einen Bot, der ohne Anzeige gegen jede Stufe spie
 
 ## Sammelangriff
 
-- Beim Wischen über weitere **eigene** Planeten fahren: Sie werden golden markiert und mit einer Linie verbunden.
+- Beim Wischen kurz (0,3 s) auf weiteren **eigenen** Planeten verweilen (goldener Ring füllt sich): Sie werden golden markiert und mit einer Linie verbunden.
 - Am Ende schicken alle Planeten der Kette ihren Anteil (50 %, per Halten bis 100 %) gemeinsam zum letzten Ziel. Endet der Wischer auf einem eigenen Planeten, sammeln sich die Armeen der vorherigen Planeten dort.
 - Die Anzeige am Ziel zeigt die Summe aller Armeen ("-> N"). Gilt auch im Mehrspieler.

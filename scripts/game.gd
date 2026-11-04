@@ -16,6 +16,7 @@ const BASE_GROWTH := 1.0       # Armee pro Sekunde auf einem besetzten Kreis
 const SEND_FRACTION := 0.5     # Anteil der vorhandenen Armee, der pro Wischen gesendet wird
 const HOLD_DELAY := 0.4        # so lange auf dem Ziel halten, bis die Prozentanzeige erscheint
 const HOLD_RAMP := 1.5         # danach steigt sie in dieser Zeit von 50 auf 100 %
+const CHAIN_DWELL := 0.3       # so lange auf einem eigenen Planeten verweilen, um ihn in die Kette aufzunehmen
 const TAP_TOLERANCE := 16.0    # Trefferfläche = sichtbarer Kreis + dieser Rand
 const MIN_HIT_RADIUS := 56.0   # auch kleine Kreise sind mindestens so gut treffbar
 const RELEASE_SNAP := 30.0     # beim Loslassen zählt ein Kreis auch knapp daneben
@@ -170,6 +171,8 @@ var shop_pause := false
 var shop_planet := -1
 var shop_votes := {1: false, 2: true}   # lokal: 1 = ich, 2 = Gegner (KI zählt immer als bereit)
 var press_pos := Vector2.ZERO
+var chain_cand := -1           # eigener Planet unter dem Finger, der gerade aufgenommen wird
+var chain_time := 0.0
 var chain: Array = []          # eigene Planeten, über die gewischt wurde (Sammelangriff)
 var title_taps := 0            # Geheimcode: 5x auf den Titel tippen
 var title_tap_time := 0
@@ -831,7 +834,6 @@ func _unhandled_input(event: InputEvent) -> void:
 		else:
 			_on_release(event.position)
 	elif event is InputEventMouseMotion and drag_active:
-		_chain_track(drag_pos, event.position)
 		drag_pos = event.position
 		queue_redraw()
 
@@ -902,6 +904,8 @@ func _on_press(pos: Vector2) -> void:
 	hold_time = 0.0
 	press_index = _circle_at(pos)
 	chain.clear()
+	chain_cand = -1
+	chain_time = 0.0
 	if press_index >= 0 and circles[press_index]["owner"] == 1:
 		selected = press_index
 		chain.append(press_index)
@@ -937,22 +941,34 @@ func _on_release(pos: Vector2) -> void:
 		selected = -1
 	press_index = -1
 	chain.clear()
+	chain_cand = -1
 	hold_target = -1
 	hold_time = 0.0
 	queue_redraw()
 
 
-# Sammelangriff: Wer beim Wischen über weitere eigene Planeten fährt, nimmt sie in die Kette auf.
-# Die Strecke wird in kleinen Schritten geprüft, damit auch schnelle Wischer nichts auslassen.
-func _chain_track(from: Vector2, to: Vector2) -> void:
-	if chain.is_empty():
+# Sammelangriff: Wer beim Wischen kurz (CHAIN_DWELL) auf einem weiteren eigenen Planeten verweilt,
+# nimmt ihn in die Kette auf. Zügiges Darüberwischen zählt nicht.
+func _chain_update(delta: float) -> void:
+	if not drag_active or chain.is_empty():
+		chain_cand = -1
+		chain_time = 0.0
 		return
-	var steps := maxi(1, int(from.distance_to(to) / 12.0))
-	for i in range(1, steps + 1):
-		var idx := _circle_at(from.lerp(to, float(i) / float(steps)))
-		if idx >= 0 and circles[idx]["owner"] == 1 and not (idx in chain):
-			chain.append(idx)
-			Input.vibrate_handheld(15)
+	var idx := _circle_at(drag_pos)
+	if idx < 0 or circles[idx]["owner"] != 1 or (idx in chain):
+		chain_cand = -1
+		chain_time = 0.0
+		return
+	if idx != chain_cand:
+		chain_cand = idx
+		chain_time = 0.0
+		return
+	chain_time += delta
+	if chain_time >= CHAIN_DWELL:
+		chain.append(idx)
+		chain_cand = -1
+		chain_time = 0.0
+		Input.vibrate_handheld(20)
 
 
 # Quellen eines Wischers: alle Planeten der Kette, außer dem Ziel (wenn es selbst in der Kette liegt)
@@ -999,6 +1015,7 @@ func _hold_percent() -> int:
 
 # Läuft jeden Frame: misst, wie lange der Finger beim Zielen auf demselben Kreis liegt.
 func _update_hold(delta: float) -> void:
+	_chain_update(delta)
 	var hover := -1
 	if drag_active and selected >= 0:
 		hover = _circle_at(drag_pos, RELEASE_SNAP)
@@ -2072,6 +2089,10 @@ func _draw_game(font: Font) -> void:
 		for ci in chain:
 			if ci != selected:
 				draw_arc(circles[ci]["pos"], circles[ci]["radius"] + 10.0, 0.0, TAU, 48, GOLD, 3.0)
+		if chain_cand >= 0:
+			var cc: Dictionary = circles[chain_cand]
+			draw_arc(cc["pos"], cc["radius"] + 10.0, -PI * 0.5, -PI * 0.5 + TAU * clampf(chain_time / CHAIN_DWELL, 0.0, 1.0),
+				48, GOLD, 3.0)
 		if hover >= 0 and hover != selected:
 			var hc: Dictionary = circles[hover]
 			end = hc["pos"]
@@ -2111,7 +2132,7 @@ func _draw_game(font: Font) -> void:
 		"Du: %d   %s: %d" % [player_count, "Gegner" if mp_role != "" else level["name"], enemy_count],
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 24, Color.WHITE)
 	draw_string(font, Vector2(20, 76),
-		"Wischen = %d %%, Ziel halten = mehr, über eigene = sammeln" % int(SEND_FRACTION * 100),
+		"Wischen = %d %%, Ziel halten = mehr, kurz auf eigenen = sammeln" % int(SEND_FRACTION * 100),
 		HORIZONTAL_ALIGNMENT_LEFT, -1, 18, Color(1, 1, 1, 0.8))
 
 	if shop_pause and not game_over:

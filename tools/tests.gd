@@ -182,13 +182,22 @@ func _initialize() -> void:
 	q.level = Game.LEVELS[0]
 	q._compute_stats()
 	q.ai_timer = 1e9
+	# hilfsfunktion: Finger bewegt sich zu pos und verweilt dwell Sekunden
 	q._on_press(spots[0])
-	q._chain_track(spots[0], spots[1])
-	q._chain_track(spots[1], spots[2])
-	check(q.chain == [0, 1, 2], "Kette A-B-C")
-	q._chain_track(spots[2], spots[0])
+	q.drag_pos = spots[1]
+	q._chain_update(0.05)   # erster Frame auf B: Kandidat
+	q._chain_update(0.1)
+	check(q.chain == [0], "noch nicht aufgenommen (zu kurz)")
+	q._chain_update(0.25)
+	check(q.chain == [0, 1], "B nach Verweilen aufgenommen")
+	q.drag_pos = spots[2]
+	q._chain_update(0.05)
+	q._chain_update(0.4)
+	check(q.chain == [0, 1, 2], "C aufgenommen")
+	q._chain_update(0.5)
 	check(q.chain.size() == 3, "keine Doppelten")
-	q._chain_track(spots[2], spots[3])
+	q.drag_pos = spots[3]
+	q._chain_update(0.05)
 	q._on_release(spots[3])
 	check(q.armies.size() == 3, "3 Armeen zum Gegner")
 	var okay := true
@@ -197,13 +206,27 @@ func _initialize() -> void:
 			okay = false
 	check(okay, "je 50 %% zum letzten Ziel")
 	check(q.chain.is_empty(), "Kette geleert")
+	# zügig darüberwischen: B zählt nicht
+	q.armies.clear()
+	for k in 3:
+		q.circles[k]["value"] = 20.0
+	q._on_press(spots[0])
+	q.drag_pos = spots[1]
+	q._chain_update(0.05)
+	q.drag_pos = spots[3]
+	q._chain_update(0.05)
+	q._on_release(spots[3])
+	check(q.armies.size() == 1, "schnelles Darüberwischen nimmt nicht auf")
 	# Ende auf eigenem Planeten: A und B sammeln auf C
 	q.armies.clear()
 	for k in 3:
 		q.circles[k]["value"] = 20.0
 	q._on_press(spots[0])
-	q._chain_track(spots[0], spots[1])
-	q._chain_track(spots[1], spots[2])
+	q.drag_pos = spots[1]
+	q._chain_update(0.05)
+	q._chain_update(0.4)
+	q.drag_pos = spots[2]
+	q._chain_update(0.05)
 	q._on_release(spots[2])
 	check(q.armies.size() == 2, "A und B sammeln auf C")
 	var to_c := true
@@ -211,12 +234,7 @@ func _initialize() -> void:
 		if a["target"] != 2:
 			to_c = false
 	check(to_c, "Ziel ist C")
-	# einfaches Wischen und Antippen wie bisher
 	q.armies.clear()
-	q._on_press(spots[0])
-	q._chain_track(spots[0], spots[3])
-	q._on_release(spots[3])
-	check(q.armies.size() == 1, "einfaches Wischen")
 	q._on_press(spots[1])
 	q._on_release(spots[1])
 	check(q.shop_pause and q.shop_planet == 1, "Antippen öffnet Upgrades")
